@@ -525,3 +525,5 @@ create policy profile_photos_insert on storage.objects for insert to authenticat
 -- DESPUÉS de registrar tu cuenta de administrador, ejecuta (con tu correo):
 --   update public.profiles set role='admin', account_status='active' where email='TU_CORREO_ADMIN';
 -- =====================================================================
+-e 
+notify pgrst, 'reload schema';
