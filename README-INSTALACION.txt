@@ -2,8 +2,11 @@ LANZEC MOTO EXPRESS - PAQUETE LISTO PARA GITHUB / SUPABASE / NETLIFY
 
 ESTRUCTURA
   .gitignore, _headers, *.html (raíz)
+  css/style.css  (estilos compartidos por todas las páginas)
   js/config.js, js/app.js, js/nav.js
-  supabase/schema.sql
+  supabase/INSTALAR-TODO.sql (primera instalación), supabase/schema.sql
+
+ACTUALIZACIÓN: si ya instalaste la base de datos, NO vuelvas a ejecutar el SQL; solo reemplaza los archivos del sitio.
 
 INSTALACIÓN (en este orden)
 1) js/config.js ya incluye tu clave publishable y el WhatsApp 51963334595. NUNCA uses la service_role/secret.
