@@ -1,725 +1,533 @@
-(function () {
+/* LANZEC MOTO EXPRESS - lógica del sitio (Supabase).
+   Secciones: 1 Utilidades · 2 Sesión · 3 Servicios (compartido) · 4 Páginas · 5 Arranque */
+(() => {
   'use strict';
 
-  var C = window.LANZEC_CONFIG || {};
-  var page = document.body.dataset.page;
-  var sb = null;
+  /* ============ 1. UTILIDADES ============ */
+  const C = window.LANZEC_CONFIG || {};
+  const page = document.body.dataset.page;
+  const $ = (s, r = document) => r.querySelector(s);
+  const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+  const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const money = n => 'S/ ' + Number(n).toFixed(2);
+  const fdate = d => new Date(d).toLocaleString('es-PE', { dateStyle: 'short', timeStyle: 'short' });
+  const pad = n => String(n).padStart(2, '0');
 
-  /* ---------- utilidades ---------- */
-  var $ = function (s, r) { return (r || document).querySelector(s); };
-  var $$ = function (s, r) { return Array.prototype.slice.call((r || document).querySelectorAll(s)); };
-  function esc(v) {
-    return String(v == null ? '' : v).replace(/[&<>"']/g, function (c) {
-      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
-    });
-  }
-  var pad = function (n) { return String(n).padStart(2, '0'); };
-  var money = function (n) { return 'S/ ' + Number(n).toFixed(2); };
-  var fdate = function (d) { return new Date(d).toLocaleString('es-PE', { dateStyle: 'short', timeStyle: 'short' }); };
-  var TYPE = { mototaxi: 'Mototaxi', delivery: 'Delivery' };
-  var ST = {
-    requested: 'Recibiendo ofertas', accepted: 'Aceptado',
-    in_progress: 'En curso', completed: 'Completado', cancelled: 'Cancelado'
-  };
-  var PANEL = { admin: 'admin.html', transporter: 'transportista.html', client: 'cliente.html' };
-  var PLANS = {
-    client: [
-      { id: 'weekly', label: 'Semanal', days: 7, price: 2 },
-      { id: 'monthly', label: 'Mensual', days: 30, price: 10 }
-    ],
-    transporter: [
-      { id: 'weekly', label: 'Semanal', days: 7, price: 8 },
-      { id: 'monthly', label: 'Mensual', days: 30, price: 25 }
-    ]
+  const TYPE = { mototaxi: 'Mototaxi', delivery: 'Delivery' };
+  const STATUS = { requested: 'Recibiendo ofertas', accepted: 'Aceptado', in_progress: 'En curso', completed: 'Completado', cancelled: 'Cancelado' };
+  const PANEL = { admin: 'admin.html', transporter: 'transportista.html', client: 'cliente.html' };
+  const PLANS = { // [id, nombre, días, precio S/]
+    client: [['weekly', 'Semanal', 7, 2], ['monthly', 'Mensual', 30, 10]],
+    transporter: [['weekly', 'Semanal', 7, 8], ['monthly', 'Mensual', 30, 25]]
   };
 
-  var noticeTimer;
-  function notice(msg, bad) {
-    var n = $('#notice');
-    if (!n) { alert(msg); return; }
+  let noticeTimer;
+  const notice = (msg, bad = false) => {
+    const n = $('#notice');
+    if (!n) return alert(msg);
     n.textContent = msg;
     n.className = 'notice' + (bad ? ' bad' : '');
     n.hidden = false;
     clearTimeout(noticeTimer);
-    if (!bad) noticeTimer = setTimeout(function () { n.hidden = true; }, 8000);
+    if (!bad) noticeTimer = setTimeout(() => (n.hidden = true), 8000);
     window.scrollTo({ top: 0, behavior: 'smooth' });
-  }
+  };
 
-  function friendly(e) {
-    var m = (e && e.message) || String(e);
-    if (/Invalid login credentials/i.test(m)) return 'Correo o contraseña incorrectos.';
-    if (/Email not confirmed/i.test(m)) return 'Debes confirmar tu correo antes de entrar. Revisa tu bandeja de entrada.';
-    if (/already registered|already been registered/i.test(m)) return 'Ese correo ya está registrado. Inicia sesión.';
-    if (/Database error saving new user/i.test(m)) return 'No se pudo crear la cuenta. Verifica que el DNI no esté ya registrado y que los datos sean válidos.';
-    if (/rate limit|too many/i.test(m)) return 'Demasiados intentos. Espera unos minutos e inténtalo de nuevo.';
-    if (/row-level security|permission denied/i.test(m)) return 'No tienes permiso para esta acción. Revisa que tu cuenta esté aprobada y tu suscripción activa.';
-    if (/Failed to fetch|NetworkError|Load failed/i.test(m)) return 'Sin conexión con el servidor. Inténtalo de nuevo.';
-    return m;
-  }
+  const ERRORS = [
+    [/Invalid login credentials/i, 'Correo o contraseña incorrectos.'],
+    [/Email not confirmed/i, 'Debes confirmar tu correo antes de entrar.'],
+    [/already registered|already been registered/i, 'Ese correo ya está registrado. Inicia sesión.'],
+    [/Database error saving new user/i, 'No se pudo crear la cuenta. Verifica que el DNI no esté ya registrado.'],
+    [/rate limit|too many/i, 'Demasiados intentos. Espera unos minutos.'],
+    [/row-level security|permission denied/i, 'No tienes permiso para esta acción. Revisa que tu cuenta esté aprobada y tu suscripción activa.'],
+    [/Failed to fetch|NetworkError|Load failed/i, 'Sin conexión con el servidor. Inténtalo de nuevo.']
+  ];
+  const friendly = e => { const m = e?.message || String(e); return (ERRORS.find(([re]) => re.test(m)) || [])[1] || m; };
 
-  function withBusy(form, fn) {
-    var b = $('button[type=submit]', form);
+  if (!window.supabase || !C.SUPABASE_KEY || /PEGA_AQUI/.test(C.SUPABASE_KEY)) {
+    notice('Configuración incompleta: revisa js/config.js', true);
+    return;
+  }
+  const sb = window.supabase.createClient(C.SUPABASE_URL, C.SUPABASE_KEY);
+
+  const q = async p => { const r = await p; if (r.error) throw r.error; return r.data; };   // consulta -> datos o error
+  const rpc = (name, args) => q(sb.rpc(name, args));
+
+  // Envía un formulario con el botón bloqueado y errores amigables
+  const onSubmit = (form, fn) => form.addEventListener('submit', async e => {
+    e.preventDefault();
+    const b = $('button[type=submit]', form);
     if (b) b.disabled = true;
-    return Promise.resolve().then(fn).catch(function (e) { notice(friendly(e), true); })
-      .then(function () { if (b) b.disabled = false; });
-  }
+    try { await fn(new FormData(form)); } catch (err) { notice(friendly(err), true); }
+    if (b) b.disabled = false;
+  });
 
-  async function rpc(name, args) {
-    var r = await sb.rpc(name, args);
-    if (r.error) throw r.error;
-    return r.data;
-  }
+  /* ============ 2. SESIÓN ============ */
+  const getSession = async () => (await sb.auth.getSession()).data.session;
+  const getProfile = uid => q(sb.from('profiles').select('*').eq('id', uid).maybeSingle());
 
-  /* ---------- sesión / perfil ---------- */
-  async function session() { return (await sb.auth.getSession()).data.session; }
-  async function myProfile(uid) {
-    var r = await sb.from('profiles').select('*').eq('id', uid).maybeSingle();
-    if (r.error) throw r.error;
-    return r.data;
-  }
+  // Exige sesión (y rol). Devuelve {user, profile} o redirige y devuelve null.
   async function guard(roles) {
-    var s = await session();
+    const s = await getSession();
     if (!s) { location.replace('login.html'); return null; }
-    var p = await myProfile(s.user.id);
+    const p = await getProfile(s.user.id);
     if (!p) { await sb.auth.signOut(); location.replace('login.html'); return null; }
-    if (roles && roles.indexOf(p.role) < 0) { location.replace(PANEL[p.role]); return null; }
+    if (roles && !roles.includes(p.role)) { location.replace(PANEL[p.role]); return null; }
+    adaptNav(p);
     return { user: s.user, profile: p };
   }
-  function statusBlock(p) {
-    return {
-      pending: 'Tu cuenta está pendiente de aprobación por administración.',
-      suspended: 'Tu cuenta está suspendida. Contacta a administración.',
-      rejected: 'Tu solicitud fue rechazada. Contacta a administración.'
-    }[p.account_status] || null;
-  }
   function adaptNav(p) {
-    var nav = $('nav');
-    if (!nav || !p) return;
-    if (p.role === 'admin') $$('a[href="suscripcion.html"]', nav).forEach(function (a) { a.remove(); });
-    var here = location.pathname.split('/').pop() || 'index.html';
-    var lo = $('[data-logout]', nav);
-    if (here !== PANEL[p.role] && !$('a[data-panel]', nav)) {
-      var a = document.createElement('a');
-      a.className = 'btn ghost small'; a.href = PANEL[p.role]; a.textContent = 'Mi panel'; a.setAttribute('data-panel', '1');
-      nav.insertBefore(a, lo);
-    }
-    if (lo) lo.style.display = '';
+    window.lanzecSetLogged?.(true);
+    const a = $('[data-panel]'); if (a) a.href = PANEL[p.role];
+    if (p.role === 'admin') $$('a[href="suscripcion.html"]').forEach(x => x.remove());
   }
+  const blockedMsg = p => ({
+    pending: 'Tu cuenta está pendiente de aprobación por administración.',
+    suspended: 'Tu cuenta está suspendida. Contacta a administración.',
+    rejected: 'Tu solicitud fue rechazada. Contacta a administración.'
+  }[p.account_status] || null);
 
-  /* ---------- cuenta regresiva de suscripción ---------- */
-  var cdTimer;
+  // Cuenta regresiva de suscripción. Devuelve true si hay suscripción activa.
+  let cdTimer;
   async function countdown(uid) {
-    var el = $('#countdown');
-    var r = await sb.from('subscriptions').select('expires_at').eq('user_id', uid).eq('status', 'active')
-      .order('expires_at', { ascending: false }).limit(1);
-    var exp = r.data && r.data[0] ? new Date(r.data[0].expires_at) : null;
-    clearInterval(cdTimer);
-    function tick() {
-      if (!el) return !!exp && exp > Date.now();
-      if (!exp) { el.textContent = 'Sin suscripción activa'; return false; }
-      var ms = exp - Date.now();
-      if (ms <= 0) { el.textContent = 'Vencida'; return false; }
-      var d = Math.floor(ms / 864e5), h = Math.floor(ms % 864e5 / 36e5),
-        m = Math.floor(ms % 36e5 / 6e4), s = Math.floor(ms % 6e4 / 1e3);
-      el.textContent = d + 'd ' + pad(h) + ':' + pad(m) + ':' + pad(s);
+    const el = $('#countdown');
+    const rows = await q(sb.from('subscriptions').select('expires_at').eq('user_id', uid).eq('status', 'active')
+      .order('expires_at', { ascending: false }).limit(1));
+    const exp = rows[0] ? new Date(rows[0].expires_at) : null;
+    const tick = () => {
+      const ms = exp ? exp - Date.now() : 0;
+      if (ms <= 0) { if (el) el.textContent = exp ? 'Vencida' : 'Sin suscripción activa'; return false; }
+      const d = Math.floor(ms / 864e5), h = Math.floor(ms % 864e5 / 36e5), m = Math.floor(ms % 36e5 / 6e4), s = Math.floor(ms % 6e4 / 1e3);
+      if (el) el.textContent = `${d}d ${pad(h)}:${pad(m)}:${pad(s)}`;
       return true;
-    }
-    var active = tick();
-    if (active) cdTimer = setInterval(function () { if (!tick()) clearInterval(cdTimer); }, 1000);
+    };
+    clearInterval(cdTimer);
+    const active = tick();
+    if (active) cdTimer = setInterval(() => tick() || clearInterval(cdTimer), 1000);
     return active;
   }
 
-  /* ---------- fotos ---------- */
-  function checkPhoto(f) {
+  const checkPhoto = f => {
     if (!/^image\/(jpeg|png|webp)$/.test(f.type)) throw new Error('La foto debe ser JPG, PNG o WEBP.');
     if (f.size > 5 * 1024 * 1024) throw new Error('La foto supera 5 MB.');
-  }
+  };
   async function uploadPhoto(file, uid) {
     checkPhoto(file);
-    var ext = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp' }[file.type];
-    var path = uid + '/' + crypto.randomUUID() + '.' + ext;
-    var r = await sb.storage.from('profile-photos').upload(path, file, { contentType: file.type, cacheControl: '3600' });
-    if (r.error) throw r.error;
+    const path = `${uid}/${crypto.randomUUID()}.${{ 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp' }[file.type]}`;
+    const { error } = await sb.storage.from('profile-photos').upload(path, file, { contentType: file.type });
+    if (error) throw error;
     await rpc('set_my_photo', { p_path: path });
-    return path;
   }
-  function photoUrl(path) { return sb.storage.from('profile-photos').getPublicUrl(path).data.publicUrl; }
+  const photoUrl = path => sb.storage.from('profile-photos').getPublicUrl(path).data.publicUrl;
 
-  /* ---------- helpers de servicios ---------- */
-  function place(t) {
-    var m = /(-?\d{1,3}\.\d+),\s*(-?\d{1,3}\.\d+)/.exec(t || '');
-    var s = esc(t);
-    return m ? s + ' <a target="_blank" rel="noopener" href="https://www.google.com/maps?q=' + m[1] + ',' + m[2] + '">Ver en mapa</a>' : s;
-  }
-  function waLink(p) {
-    var d = String(p || '').replace(/\D/g, '');
-    if (d.length === 9) d = '51' + d;
-    return 'https://wa.me/' + d;
-  }
-  function contactHtml(c) {
-    if (!c) return '';
-    var tel = String(c.phone || '').replace(/[^\d+]/g, '');
-    return '<p><b>' + esc(c.name) + '</b> · <a href="tel:' + esc(tel) + '">' + esc(c.phone) +
-      '</a> · <a target="_blank" rel="noopener" href="' + waLink(c.phone) + '">WhatsApp</a></p>' +
-      (c.plate ? '<p class="muted">Moto: ' + esc(c.motorcycle) + ' · ' + esc(c.color) + ' · Placa ' + esc(c.plate) + '</p>' : '');
-  }
-  var contacts = new Map();
-  async function loadContacts(list) {
-    var need = list.filter(function (s) {
-      return ['accepted', 'in_progress', 'completed'].indexOf(s.status) >= 0 && !contacts.has(s.id);
-    });
-    await Promise.all(need.map(async function (s) {
-      var r = await sb.rpc('service_contact', { p_id: s.id });
-      if (!r.error && r.data) contacts.set(s.id, r.data);
-    }));
+  /* ============ 3. SERVICIOS (cliente y transportista) ============ */
+  const mapLink = t => {
+    const m = /(-?\d{1,3}\.\d+),\s*(-?\d{1,3}\.\d+)/.exec(t || '');
+    return esc(t) + (m ? ` <a target="_blank" rel="noopener" href="https://www.google.com/maps?q=${m[1]},${m[2]}">Ver en mapa</a>` : '');
+  };
+  const waLink = p => { let d = String(p || '').replace(/\D/g, ''); if (d.length === 9) d = '51' + d; return 'https://wa.me/' + d; };
+  const contactHtml = c => !c ? '' :
+    `<p><b>${esc(c.name)}</b> · <a href="tel:${esc(String(c.phone).replace(/[^\d+]/g, ''))}">${esc(c.phone)}</a> · <a target="_blank" rel="noopener" href="${waLink(c.phone)}">WhatsApp</a></p>` +
+    (c.plate ? `<p class="muted">Moto: ${esc(c.motorcycle)} · ${esc(c.color)} · Placa ${esc(c.plate)}</p>` : '');
+  const routeHtml = s =>
+    `<p><b>${mapLink(s.origin)}</b>${s.origin_reference ? ` <span class="muted">(${esc(s.origin_reference)})</span>` : ''}<br>→ ${esc(s.destination)}</p>`;
+  const headHtml = s => `<div class="row"><span class="pill">${TYPE[s.service_type]}</span><span class="pill">${STATUS[s.status]}</span></div>`;
+  const btn = (act, id, label, cls = '', extra = '') => `<button class="btn ${cls} small" data-act="${act}" data-id="${id}" ${extra}>${label}</button>`;
+
+  // Datos de contacto (solo tras aceptar). Se guardan en caché.
+  const contactCache = {};
+  async function getContacts(list) {
+    await Promise.all(list.filter(s => ['accepted', 'in_progress', 'completed'].includes(s.status) && !contactCache[s.id])
+      .map(async s => { try { const c = await rpc('service_contact', { p_id: s.id }); if (c) contactCache[s.id] = c; } catch (e) { /* se reintenta */ } }));
+    return contactCache;
   }
 
-  var ACTIONS = {
-    'accept-offer': function (b) { return rpc('accept_offer', { p_offer: b.dataset.offer }); },
-    'cancel': function (b) { return rpc('update_service_status', { p_id: b.dataset.id, p_status: 'cancelled' }); },
-    'accept': function (b) { return rpc('accept_service', { p_id: b.dataset.id }); },
-    'offer': function (b) {
-      var v = parseFloat(b.closest('.service-card').querySelector('input').value);
+  // Botones de acción -> funciones del servidor
+  const status = (b, st) => rpc('update_service_status', { p_id: b.dataset.id, p_status: st });
+  const ACTIONS = {
+    'accept-offer': b => rpc('accept_offer', { p_offer: b.dataset.offer }),
+    'cancel': b => status(b, 'cancelled'),
+    'accept': b => rpc('accept_service', { p_id: b.dataset.id }),
+    'offer': b => {
+      const v = parseFloat(b.closest('.service-card').querySelector('input').value);
       if (!(v >= 0.5 && v <= 500)) throw new Error('Ingresa una oferta entre S/ 0.50 y S/ 500.');
       return rpc('make_offer', { p_service: b.dataset.id, p_price: v });
     },
-    'withdraw-offer': function (b) { return rpc('withdraw_offer', { p_service: b.dataset.id }); },
-    'start': function (b) { return rpc('update_service_status', { p_id: b.dataset.id, p_status: 'in_progress' }); },
-    'finish': function (b) { return rpc('update_service_status', { p_id: b.dataset.id, p_status: 'completed' }); }
+    'withdraw-offer': b => rpc('withdraw_offer', { p_service: b.dataset.id }),
+    'start': b => status(b, 'in_progress'),
+    'finish': b => status(b, 'completed')
   };
-  var CONFIRM = {
-    cancel: '¿Cancelar este servicio?', finish: '¿Marcar el servicio como finalizado?',
-    'withdraw-offer': '¿Retirar tu oferta?', 'accept-offer': '¿Aceptar esta oferta? Se rechazarán las demás.',
-    accept: '¿Aceptar este servicio al precio propuesto?'
+  const CONFIRM = {
+    cancel: '¿Cancelar este servicio?', finish: '¿Marcar el servicio como finalizado?', 'withdraw-offer': '¿Retirar tu oferta?',
+    'accept-offer': '¿Aceptar esta oferta? Se rechazarán las demás.', accept: '¿Aceptar este servicio al precio propuesto?'
   };
 
-  function bindActions(container, refresh) {
-    container.addEventListener('click', async function (e) {
-      var b = e.target.closest('button[data-act]');
-      if (!b) return;
-      var a = b.dataset.act;
-      if (CONFIRM[a] && !confirm(CONFIRM[a])) return;
-      b.disabled = true;
-      try {
-        await ACTIONS[a](b);
-        notice('Listo.');
-        await refresh(true);
-      } catch (err) {
-        notice(friendly(err), true);
-      } finally { b.disabled = false; }
-    });
-  }
-
-  function poll(fn, ms) {
-    var busy = false, failed = false;
-    var run = async function (force) {
+  // Lista que se actualiza sola cada 8 s y solo redibuja si hay cambios. Devuelve la función "refresh".
+  function liveList(box, load, render) {
+    let last = '', busy = false, failed = false;
+    const refresh = async (force = false) => {
       if (busy || (document.hidden && !force)) return;
       busy = true;
-      try { await fn(force === true); failed = false; }
-      catch (e) { console.error(e); if (!failed) { failed = true; notice(friendly(e), true); } }
-      finally { busy = false; }
+      try {
+        const data = await load();
+        const sig = JSON.stringify(data);
+        const typing = box.contains(document.activeElement) && document.activeElement.tagName === 'INPUT';
+        if (force || (sig !== last && !typing)) { last = sig; box.innerHTML = render(data); }
+        failed = false;
+      } catch (e) { console.error(e); if (!failed) { failed = true; notice(friendly(e), true); } }
+      busy = false;
     };
-    run(true);
-    setInterval(run, ms);
-    document.addEventListener('visibilitychange', function () { if (!document.hidden) run(true); });
-    return run;
-  }
-
-  /* =====================================================================
-     PÁGINAS
-     ===================================================================== */
-
-  async function homePage() {
-    var s = await session();
-    if (s) { var p = await myProfile(s.user.id); adaptNav(p); }
-  }
-
-  async function loginPage() {
-    var s = await session();
-    if (s) {
-      var p0 = await myProfile(s.user.id);
-      if (p0) { location.replace(PANEL[p0.role]); return; }
-    }
-    var f = $('#loginForm');
-    f.addEventListener('submit', function (e) {
-      e.preventDefault();
-      withBusy(f, async function () {
-        var r = await sb.auth.signInWithPassword({
-          email: $('#email').value.trim().toLowerCase(), password: $('#password').value
-        });
-        if (r.error) throw r.error;
-        var p = await myProfile(r.data.user.id);
-        if (!p) throw new Error('No se encontró tu perfil. Contacta a administración.');
-        location.href = PANEL[p.role];
-      });
+    box.addEventListener('click', async e => {
+      const b = e.target.closest('button[data-act]');
+      if (!b) return;
+      const act = b.dataset.act;
+      if (CONFIRM[act] && !confirm(CONFIRM[act])) return;
+      b.disabled = true;
+      try { await ACTIONS[act](b); notice('Listo.'); busy = false; await refresh(true); }
+      catch (err) { notice(friendly(err), true); b.disabled = false; }
     });
+    refresh(true);
+    setInterval(() => refresh(), 8000);
+    document.addEventListener('visibilitychange', () => !document.hidden && refresh(true));
+    return refresh;
   }
 
-  function regPage(role) {
-    var f = $('#registerForm');
-    f.addEventListener('submit', function (e) {
-      e.preventDefault();
-      withBusy(f, async function () {
-        var d = new FormData(f);
-        var v = function (n) { return String(d.get(n) || '').trim(); };
-        var pw = String(d.get('password') || '');
-        if (pw.length < 8) throw new Error('La contraseña debe tener al menos 8 caracteres.');
-        if (pw !== d.get('confirm_password')) throw new Error('Las contraseñas no coinciden.');
-        if (!/^\d{8}$/.test(v('dni'))) throw new Error('El DNI debe tener exactamente 8 dígitos.');
-        var age = parseInt(v('age'), 10);
-        if (!(age >= 18 && age <= 100)) throw new Error('Debes ser mayor de 18 años.');
-        if (!/^[0-9+\s-]{6,20}$/.test(v('phone'))) throw new Error('Ingresa un celular válido.');
-        var meta = { role: role, full_name: v('full_name'), age: age, dni: v('dni'), phone: v('phone') };
-        var file = null;
-        if (role === 'transporter') {
-          meta.motorcycle = v('motorcycle');
-          meta.plate = v('plate').toUpperCase();
-          meta.motorcycle_color = v('motorcycle_color');
-          meta.service_types = d.getAll('service_types');
-          if (!meta.service_types.length) throw new Error('Selecciona Mototaxi, Delivery o ambos.');
-          file = f.profile_photo && f.profile_photo.files[0] ? f.profile_photo.files[0] : null;
-          if (file) checkPhoto(file);
-        }
-        var r = await sb.auth.signUp({ email: v('email').toLowerCase(), password: pw, options: { data: meta } });
-        if (r.error) throw r.error;
-        if (r.data.user && r.data.user.identities && !r.data.user.identities.length)
-          throw new Error('Ese correo ya está registrado. Inicia sesión.');
-        if (r.data.session) {
-          if (file) { try { await uploadPhoto(file, r.data.user.id); } catch (err) { console.error(err); } }
-          notice('Cuenta creada. Ahora elige tu suscripción.');
-          setTimeout(function () {
-            location.href = 'suscripcion.html' + (role === 'transporter' ? '?role=transporter' : '');
-          }, 900);
-        } else {
-          notice('Cuenta creada. Confirma tu correo y luego inicia sesión.');
-          setTimeout(function () { location.href = 'login.html'; }, 3500);
-        }
-      });
-    });
-  }
+  /* ============ 4. PÁGINAS ============ */
+  const pages = {};
 
-  async function subscriptionPage() {
-    var form = $('#subscriptionForm');
-    var s = await session();
-    if (!s) {
-      notice('Inicia sesión para solicitar tu suscripción.', true);
-      form.style.display = 'none';
-      return;
-    }
-    var p = await myProfile(s.user.id);
-    if (!p) { notice('No se encontró tu perfil.', true); return; }
-    if (p.role === 'admin') { location.replace('admin.html'); return; }
+  pages.home = async () => {
+    const s = await getSession(); if (!s) return;
+    const p = await getProfile(s.user.id); if (!p) return;
     adaptNav(p);
-    var PL = PLANS[p.role];
-    $('#plans').innerHTML = PL.map(function (x, i) {
-      return '<label class="plan"><input type="radio" name="plan" value="' + x.id + '"' + (i ? '' : ' checked') +
-        '><span><b>' + x.label + '</b><small>' + x.days + ' días</small></span><strong>S/ ' + x.price + '</strong></label>';
-    }).join('');
-    if ($('#yapePhone') && C.YAPE_PHONE) $('#yapePhone').textContent = C.YAPE_PHONE;
-    if ($('#yapeHolder') && C.YAPE_HOLDER) $('#yapeHolder').textContent = C.YAPE_HOLDER;
+    const box = $('#heroActions');
+    if (box) box.innerHTML = `<a class="btn" href="${PANEL[p.role]}">Ir a mi panel</a>`;
+  };
 
-    var hist = document.createElement('section');
-    hist.className = 'card';
-    $('main').appendChild(hist);
-    async function loadHist() {
-      var r = await sb.from('subscriptions').select('*').eq('user_id', p.id).order('created_at', { ascending: false }).limit(10);
-      if (r.error) throw r.error;
-      var L = { pending: 'En revisión', active: 'Activa', rejected: 'Rechazada' };
-      hist.innerHTML = '<h2>Mis solicitudes</h2>' + (r.data.length ? r.data.map(function (x) {
-        return '<div class="service-card"><div class="row"><b>' + (x.plan === 'weekly' ? 'Semanal' : 'Mensual') + ' · ' + money(x.amount) +
-          '</b><span class="pill">' + L[x.status] + '</span></div><small class="muted">Solicitada ' + fdate(x.created_at) +
-          (x.status === 'active' ? ' · vence ' + fdate(x.expires_at) : '') + '</small></div>';
-      }).join('') : '<div class="empty">Aún no tienes solicitudes.</div>');
-    }
-    loadHist().catch(function (e) { notice(friendly(e), true); });
-
-    form.addEventListener('submit', function (e) {
-      e.preventDefault();
-      withBusy(form, async function () {
-        var plan = new FormData(form).get('plan');
-        var pl = PL.filter(function (x) { return x.id === plan; })[0];
-        var id = await rpc('request_subscription', { p_plan: plan });
-        var msg = 'Hola, quiero activar mi suscripción ' + pl.label + ' (S/ ' + pl.price + ') en LANZEC MOTO EXPRESS.\n' +
-          'Nombre: ' + p.full_name + '\nDNI: ' + p.dni + '\nCelular: ' + p.phone + '\nCorreo: ' + p.email + '\nTipo de cuenta: ' + (p.role === 'client' ? 'Cliente' : 'Transportista') +
-          '\nSolicitud: ' + String(id).slice(0, 8) + '\nAdjunto mi captura de pago de Yape' +
-          (p.role === 'transporter' ? ' y la foto del frente de mi DNI.' : '.');
-        var url = 'https://wa.me/' + (C.WHATSAPP || '') + '?text=' + encodeURIComponent(msg);
-        var box = $('#waBox');
-        if (!box) { box = document.createElement('div'); box.id = 'waBox'; box.className = 'card'; form.parentNode.appendChild(box); }
-        box.innerHTML = '<p>✅ Solicitud registrada. Abre WhatsApp y adjunta manualmente tu captura de pago' +
-          (p.role === 'transporter' ? ' y la foto de tu DNI' : '') + '.</p><a class="btn" target="_blank" rel="noopener" href="' + esc(url) + '">Abrir WhatsApp</a>';
-        window.open(url, '_blank', 'noopener');
-        await loadHist();
-      });
+  pages.login = async () => {
+    const s = await getSession();
+    if (s) { const p = await getProfile(s.user.id); if (p) return location.replace(PANEL[p.role]); }
+    onSubmit($('#loginForm'), async () => {
+      const { data, error } = await sb.auth.signInWithPassword({ email: $('#email').value.trim().toLowerCase(), password: $('#password').value });
+      if (error) throw error;
+      const p = await getProfile(data.user.id);
+      if (!p) throw new Error('No se encontró tu perfil. Contacta a administración.');
+      location.href = PANEL[p.role];
     });
-  }
+  };
 
-  async function clientPage() {
-    var g = await guard(['client']);
-    if (!g) return;
-    adaptNav(g.profile);
+  const registerPage = role => () => onSubmit($('#registerForm'), async d => {
+    const v = n => String(d.get(n) || '').trim();
+    const pw = String(d.get('password') || '');
+    const age = parseInt(v('age'), 10);
+    if (pw.length < 8) throw new Error('La contraseña debe tener al menos 8 caracteres.');
+    if (pw !== d.get('confirm_password')) throw new Error('Las contraseñas no coinciden.');
+    if (!/^\d{8}$/.test(v('dni'))) throw new Error('El DNI debe tener exactamente 8 dígitos.');
+    if (!(age >= 18 && age <= 100)) throw new Error('Debes ser mayor de 18 años.');
+    if (!/^[0-9+\s-]{6,20}$/.test(v('phone'))) throw new Error('Ingresa un celular válido.');
+    const meta = { role, full_name: v('full_name'), age, dni: v('dni'), phone: v('phone') };
+    let file = null;
+    if (role === 'transporter') {
+      Object.assign(meta, { motorcycle: v('motorcycle'), plate: v('plate').toUpperCase(), motorcycle_color: v('motorcycle_color'), service_types: d.getAll('service_types') });
+      if (!meta.service_types.length) throw new Error('Selecciona Mototaxi, Delivery o ambos.');
+      file = $('[name=profile_photo]').files[0] || null;
+      if (file) checkPhoto(file);
+    }
+    const { data, error } = await sb.auth.signUp({ email: v('email').toLowerCase(), password: pw, options: { data: meta } });
+    if (error) throw error;
+    if (data.user?.identities && !data.user.identities.length) throw new Error('Ese correo ya está registrado. Inicia sesión.');
+    if (data.session) {
+      if (file) await uploadPhoto(file, data.user.id).catch(console.error);
+      notice('Cuenta creada. Ahora elige tu suscripción.');
+      setTimeout(() => (location.href = 'suscripcion.html'), 900);
+    } else {
+      notice('Cuenta creada. Confirma tu correo y luego inicia sesión.');
+      setTimeout(() => (location.href = 'login.html'), 3500);
+    }
+  });
+  pages['register-client'] = registerPage('client');
+  pages['register-transporter'] = registerPage('transporter');
+
+  pages.subscription = async () => {
+    const form = $('#subscriptionForm');
+    const s = await getSession();
+    if (!s) { notice('Inicia sesión para solicitar tu suscripción.', true); form.style.display = 'none'; return; }
+    const p = await getProfile(s.user.id);
+    if (!p) return notice('No se encontró tu perfil.', true);
+    if (p.role === 'admin') return location.replace('admin.html');
+    adaptNav(p);
+    const plans = PLANS[p.role];
+    $('#plans').innerHTML = plans.map(([id, name, days, price], i) =>
+      `<label class="plan"><input type="radio" name="plan" value="${id}" ${i ? '' : 'checked'}><span><b>${name}</b><small>${days} días</small></span><strong>S/ ${price}</strong></label>`).join('');
+    $('#yapePhone').textContent = C.YAPE_PHONE;
+    $('#yapeHolder').textContent = C.YAPE_HOLDER;
+
+    const hist = document.createElement('section');
+    hist.className = 'card';
+    $('main').append(hist);
+    const loadHist = async () => {
+      const rows = await q(sb.from('subscriptions').select('*').eq('user_id', p.id).order('created_at', { ascending: false }).limit(10));
+      const L = { pending: 'En revisión', active: 'Activa', rejected: 'Rechazada' };
+      hist.innerHTML = '<h2>Mis solicitudes</h2>' + (rows.map(x =>
+        `<div class="service-card"><div class="row"><b>${x.plan === 'weekly' ? 'Semanal' : 'Mensual'} · ${money(x.amount)}</b><span class="pill">${L[x.status]}</span></div>` +
+        `<small class="muted">Solicitada ${fdate(x.created_at)}${x.status === 'active' ? ' · vence ' + fdate(x.expires_at) : ''}</small></div>`).join('') || '<div class="empty">Aún no tienes solicitudes.</div>');
+    };
+    loadHist().catch(e => notice(friendly(e), true));
+
+    onSubmit(form, async d => {
+      const [, name, , price] = plans.find(x => x[0] === d.get('plan'));
+      const id = await rpc('request_subscription', { p_plan: d.get('plan') });
+      const isT = p.role === 'transporter';
+      const msg = `Hola, quiero activar mi suscripción ${name} (S/ ${price}) en LANZEC MOTO EXPRESS.\nNombre: ${p.full_name}\nDNI: ${p.dni}\nCelular: ${p.phone}\n` +
+        `Correo: ${p.email}\nTipo de cuenta: ${isT ? 'Transportista' : 'Cliente'}\nSolicitud: ${String(id).slice(0, 8)}\nAdjunto mi captura de pago de Yape${isT ? ' y la foto del frente de mi DNI.' : '.'}`;
+      const url = `https://wa.me/${C.WHATSAPP}?text=${encodeURIComponent(msg)}`;
+      let box = $('#waBox');
+      if (!box) { box = document.createElement('div'); box.id = 'waBox'; box.className = 'card'; form.parentNode.append(box); }
+      box.innerHTML = `<p>✅ Solicitud registrada. Abre WhatsApp y adjunta manualmente tu captura de pago${isT ? ' y la foto de tu DNI' : ''}.</p><a class="btn" target="_blank" rel="noopener" href="${esc(url)}">Abrir WhatsApp</a>`;
+      window.open(url, '_blank', 'noopener');
+      await loadHist();
+    });
+  };
+
+  pages.client = async () => {
+    const g = await guard(['client']); if (!g) return;
     $('#welcome').textContent = 'Hola, ' + g.profile.full_name.split(' ')[0];
-    var blocked = statusBlock(g.profile);
-    var hasSub = await countdown(g.user.id);
-    var f = $('#requestForm');
-    if (blocked) { notice(blocked, true); f.style.display = 'none'; return; }
+    const hasSub = await countdown(g.user.id);
+    const form = $('#requestForm');
+    const blocked = blockedMsg(g.profile);
+    if (blocked) { notice(blocked, true); form.style.display = 'none'; return; }
     if (!hasSub) notice('No tienes suscripción activa. Para solicitar servicios, activa un plan en "Suscripciones".', true);
 
-    $('#locate').addEventListener('click', function () {
-      var b = $('#locate');
+    $('#locate').addEventListener('click', e => {
       if (!navigator.geolocation) return notice('Tu navegador no permite obtener la ubicación.', true);
-      b.disabled = true;
-      navigator.geolocation.getCurrentPosition(function (pos) {
-        $('#origin').value = 'Ubicación GPS: ' + pos.coords.latitude.toFixed(6) + ', ' + pos.coords.longitude.toFixed(6);
+      const b = e.currentTarget; b.disabled = true;
+      navigator.geolocation.getCurrentPosition(pos => {
+        $('#origin').value = `Ubicación GPS: ${pos.coords.latitude.toFixed(6)}, ${pos.coords.longitude.toFixed(6)}`;
         b.disabled = false;
-        notice('Ubicación agregada. Puedes añadir una referencia para ayudar al transportista.');
-      }, function () {
-        b.disabled = false;
-        notice('No se pudo obtener tu ubicación. Escribe la dirección manualmente.', true);
-      }, { enableHighAccuracy: true, timeout: 10000 });
+        notice('Ubicación agregada. Puedes añadir una referencia.');
+      }, () => { b.disabled = false; notice('No se pudo obtener tu ubicación. Escribe la dirección.', true); }, { enableHighAccuracy: true, timeout: 10000 });
     });
 
-    var box = $('#myServices'), lastSig = '';
-    function offersHtml(list) {
-      if (!list.length) return '<div class="details"><small class="muted">Aún no hay ofertas. Los transportistas pueden aceptar tu precio u ofertar otro. Se actualiza solo.</small></div>';
-      return '<div class="details"><b>Ofertas recibidas (' + list.length + ')</b>' + list.map(function (o, i) {
-        return '<div class="row" style="margin-top:10px;flex-wrap:wrap"><div style="display:flex;gap:10px;align-items:center">' +
-          (o.photo_path ? '<img alt="" src="' + esc(photoUrl(o.photo_path)) + '" style="width:40px;height:40px;border-radius:50%;object-fit:cover;border:2px solid var(--cyan)">' : '') +
-          '<div><b>' + esc(o.transporter_name) + '</b>' + (i === 0 && list.length > 1 ? ' <span class="badge">Mejor precio</span>' : '') +
-          '<br><small class="muted">' + esc(o.motorcycle || '') + ' · ' + esc(o.color || '') + '</small></div></div>' +
-          '<div style="display:flex;gap:10px;align-items:center"><strong style="font-size:1.3rem;color:var(--cyan)">' + money(o.price) +
-          '</strong><button class="btn small" data-act="accept-offer" data-offer="' + o.offer_id + '" data-id="' + o.service_id + '">Aceptar</button></div></div>';
-      }).join('') + '</div>';
-    }
-    function card(s, offers) {
-      var c = contacts.get(s.id), actions = '';
-      if (['requested', 'accepted'].indexOf(s.status) >= 0)
-        actions = '<button class="btn danger small" data-act="cancel" data-id="' + s.id + '">Cancelar</button>';
-      return '<div class="service-card"><div class="row"><span class="pill">' + TYPE[s.service_type] + '</span><span class="pill">' + ST[s.status] + '</span></div>' +
-        '<p><b>' + place(s.origin) + '</b>' + (s.origin_reference ? ' <span class="muted">(' + esc(s.origin_reference) + ')</span>' : '') +
-        '<br>→ ' + esc(s.destination) + '</p>' +
-        '<p>' + (s.status === 'requested' ? 'Tu precio propuesto' : 'Precio acordado') + ': <b>' + money(s.final_price || s.proposed_price) + '</b> · Pago: ' + esc(s.payment_method) + '</p>' +
-        (s.note ? '<p class="muted">' + esc(s.note) + '</p>' : '') +
-        (s.status === 'requested' ? offersHtml(offers) : '') +
-        (c ? '<div class="details">' + contactHtml(c) + '</div>' : '') +
-        '<small class="muted">' + fdate(s.created_at) + '</small>' +
-        (actions ? '<div class="actions">' + actions + '</div>' : '') + '</div>';
-    }
-    var refresh = poll(async function (force) {
-      var r = await sb.from('services').select('*').eq('client_id', g.user.id).order('created_at', { ascending: false }).limit(50);
-      if (r.error) throw r.error;
-      var of = await sb.rpc('client_offers');
-      if (of.error) throw of.error;
-      var byS = {};
-      (of.data || []).forEach(function (o) { (byS[o.service_id] = byS[o.service_id] || []).push(o); });
-      await loadContacts(r.data);
-      var sig = JSON.stringify(r.data.map(function (s) { return [s.id, s.status, s.final_price]; })) +
-        JSON.stringify((of.data || []).map(function (o) { return [o.offer_id, o.price]; })) + contacts.size;
-      if (sig === lastSig && !force) return;
-      lastSig = sig;
-      box.innerHTML = r.data.length ? r.data.map(function (s) { return card(s, byS[s.id] || []); }).join('') : '<div class="empty">Aún no has solicitado servicios.</div>';
-    }, 8000);
-    bindActions(box, function () { lastSig = ''; return refresh(true); });
+    const offersHtml = list => !list.length
+      ? '<div class="details"><small class="muted">Aún no hay ofertas. Los transportistas pueden aceptar tu precio u ofertar otro. Se actualiza solo.</small></div>'
+      : `<div class="details"><b>Ofertas recibidas (${list.length})</b>` + list.map((o, i) =>
+        `<div class="row" style="margin-top:10px;flex-wrap:wrap"><div style="display:flex;gap:10px;align-items:center">` +
+        (o.photo_path ? `<img alt="" src="${esc(photoUrl(o.photo_path))}" style="width:40px;height:40px;border-radius:50%;object-fit:cover;border:2px solid var(--cyan)">` : '') +
+        `<div><b>${esc(o.transporter_name)}</b>${i === 0 && list.length > 1 ? ' <span class="badge">Mejor precio</span>' : ''}<br><small class="muted">${esc(o.motorcycle)} · ${esc(o.color)}</small></div></div>` +
+        `<div style="display:flex;gap:10px;align-items:center"><strong style="font-size:1.3rem;color:var(--cyan)">${money(o.price)}</strong>${btn('accept-offer', o.service_id, 'Aceptar', '', `data-offer="${o.offer_id}"`)}</div></div>`).join('') + '</div>';
 
-    f.addEventListener('submit', function (e) {
-      e.preventDefault();
-      withBusy(f, async function () {
-        var d = new FormData(f);
-        var price = parseFloat(d.get('proposed_price'));
-        if (!(price >= 0.5 && price <= 500)) throw new Error('El precio debe estar entre S/ 0.50 y S/ 500.');
-        var row = {
-          client_id: g.user.id, service_type: d.get('service_type'),
-          origin: String(d.get('origin')).trim(), origin_reference: String(d.get('origin_reference') || '').trim() || null,
-          destination: String(d.get('destination')).trim(), payment_method: d.get('payment_method'),
-          note: String(d.get('note') || '').trim() || null, proposed_price: price
-        };
-        var r = await sb.from('services').insert(row);
-        if (r.error) {
-          if (/row-level security/i.test(r.error.message))
-            throw new Error('No se pudo enviar: necesitas una suscripción activa y máximo 5 servicios abiertos a la vez.');
-          throw r.error;
-        }
-        notice('Solicitud enviada. Espera la respuesta de un transportista.');
-        f.reset();
-        lastSig = '';
-        await refresh(true);
+    const refresh = liveList($('#myServices'), async () => {
+      const services = await q(sb.from('services').select('*').eq('client_id', g.user.id).order('created_at', { ascending: false }).limit(50));
+      return { services, offers: await rpc('client_offers'), contacts: await getContacts(services) };
+    }, ({ services, offers, contacts }) => !services.length ? '<div class="empty">Aún no has solicitado servicios.</div>' : services.map(s =>
+      `<div class="service-card">${headHtml(s)}${routeHtml(s)}` +
+      `<p>${s.status === 'requested' ? 'Tu precio propuesto' : 'Precio acordado'}: <b>${money(s.final_price || s.proposed_price)}</b> · Pago: ${esc(s.payment_method)}</p>` +
+      (s.note ? `<p class="muted">${esc(s.note)}</p>` : '') +
+      (s.status === 'requested' ? offersHtml(offers.filter(o => o.service_id === s.id)) : '') +
+      (contacts[s.id] ? `<div class="details">${contactHtml(contacts[s.id])}</div>` : '') +
+      `<small class="muted">${fdate(s.created_at)}</small>` +
+      (['requested', 'accepted'].includes(s.status) ? `<div class="actions">${btn('cancel', s.id, 'Cancelar', 'danger')}</div>` : '') + '</div>').join(''));
+
+    onSubmit(form, async d => {
+      const price = parseFloat(d.get('proposed_price'));
+      if (!(price >= 0.5 && price <= 500)) throw new Error('El precio debe estar entre S/ 0.50 y S/ 500.');
+      const { error } = await sb.from('services').insert({
+        client_id: g.user.id, service_type: d.get('service_type'), origin: String(d.get('origin')).trim(),
+        origin_reference: String(d.get('origin_reference') || '').trim() || null, destination: String(d.get('destination')).trim(),
+        payment_method: d.get('payment_method'), note: String(d.get('note') || '').trim() || null, proposed_price: price
       });
+      if (error) throw /row-level security/i.test(error.message)
+        ? new Error('No se pudo enviar: necesitas una suscripción activa y máximo 5 servicios abiertos a la vez.') : error;
+      notice('Solicitud enviada. Espera las ofertas de los transportistas.');
+      form.reset();
+      await refresh(true);
     });
-  }
+  };
 
-  async function transporterPage() {
-    var g = await guard(['transporter']);
-    if (!g) return;
-    var uid = g.user.id;
-    adaptNav(g.profile);
+  pages.transporter = async () => {
+    const g = await guard(['transporter']); if (!g) return;
+    const uid = g.user.id;
     $('#welcome').textContent = 'Hola, ' + g.profile.full_name.split(' ')[0];
-    var blocked = statusBlock(g.profile);
-    var hasSub = await countdown(uid);
-    var box = $('#requests');
+    const hasSub = await countdown(uid);
+    const box = $('#requests');
 
-    var tp = await sb.from('transporter_profiles').select('*').eq('user_id', uid).maybeSingle();
-    var t = tp.data;
-    if (t && t.photo_path) {
-      $('#welcome').insertAdjacentHTML('beforebegin', '<img class="avatar" alt="Tu foto" src="' + esc(photoUrl(t.photo_path)) + '">');
+    const t = await q(sb.from('transporter_profiles').select('*').eq('user_id', uid).maybeSingle());
+    if (t?.photo_path) {
+      $('#welcome').insertAdjacentHTML('beforebegin', `<img class="avatar" alt="Tu foto" src="${esc(photoUrl(t.photo_path))}">`);
     } else if (t) {
-      var pc = document.createElement('section');
-      pc.className = 'card';
-      pc.innerHTML = '<h2>Foto de perfil</h2><p class="muted">Sube tu foto para que los clientes te reconozcan (JPG/PNG/WEBP, máx. 5 MB).</p>' +
+      const card = document.createElement('section');
+      card.className = 'card';
+      card.innerHTML = '<h2>Foto de perfil</h2><p class="muted">Sube tu foto para que los clientes te reconozcan (JPG/PNG/WEBP, máx. 5 MB).</p>' +
         '<form><input type="file" accept="image/jpeg,image/png,image/webp" required><button class="btn" type="submit">Subir foto</button></form>';
-      $('main').insertBefore(pc, $('main section.card'));
-      var pf = $('form', pc);
-      pf.addEventListener('submit', function (e) {
-        e.preventDefault();
-        withBusy(pf, async function () {
-          await uploadPhoto($('input', pf).files[0], uid);
-          pc.remove();
-          notice('Foto subida correctamente.');
-        });
-      });
+      $('main').insertBefore(card, $('main section.card'));
+      onSubmit($('form', card), async () => { await uploadPhoto($('input', card).files[0], uid); card.remove(); notice('Foto subida correctamente.'); });
     }
 
-    if (blocked) { notice(blocked, true); box.innerHTML = '<div class="empty">' + esc(blocked) + '</div>'; return; }
+    const blocked = blockedMsg(g.profile);
+    if (blocked) { notice(blocked, true); box.innerHTML = `<div class="empty">${esc(blocked)}</div>`; return; }
     if (!hasSub) notice('Tu suscripción no está activa. Renueva para recibir nuevas solicitudes.', true);
 
-    function availCard(s, mo) {
-      var has = mo && mo.status === 'pending';
-      return '<div class="service-card"><div class="row"><span class="pill">' + TYPE[s.service_type] + '</span><b>' + money(s.proposed_price) + '</b></div>' +
-        '<p><b>' + place(s.origin) + '</b>' + (s.origin_reference ? ' <span class="muted">(' + esc(s.origin_reference) + ')</span>' : '') +
-        '<br>→ ' + esc(s.destination) + '</p>' +
-        '<p class="muted">Cliente: ' + esc(s.client_name || '—') + ' · Pago: ' + esc(s.payment_method) + '</p>' +
-        (s.note ? '<p class="muted">' + esc(s.note) + '</p>' : '') +
-        (has ? '<p>Tu oferta: <b>' + money(mo.price) + '</b> · esperando que el cliente elija.</p>' : '') +
-        '<div class="actions"><button class="btn small" data-act="accept" data-id="' + s.id + '">Aceptar ' + money(s.proposed_price) + '</button></div>' +
-        '<div class="actions"><input type="number" min="0.5" max="500" step="0.5" placeholder="Tu oferta S/" style="max-width:170px" aria-label="Tu oferta">' +
-        '<button class="btn secondary small" data-act="offer" data-id="' + s.id + '">' + (has ? 'Actualizar oferta' : 'Enviar oferta') + '</button>' +
-        (has ? '<button class="btn ghost small" data-act="withdraw-offer" data-id="' + s.id + '">Retirar oferta</button>' : '') + '</div>' +
-        '<small class="muted">' + fdate(s.created_at) + '</small></div>';
-    }
-    function mineCard(s) {
-      var c = contacts.get(s.id), acts = '';
-      if (s.status === 'accepted')
-        acts = '<button class="btn small" data-act="start" data-id="' + s.id + '">Iniciar servicio</button>' +
-          '<button class="btn danger small" data-act="cancel" data-id="' + s.id + '">Cancelar</button>';
-      if (s.status === 'in_progress')
-        acts = '<button class="btn small" data-act="finish" data-id="' + s.id + '">Finalizar servicio</button>';
-      return '<div class="service-card"><div class="row"><span class="pill">' + TYPE[s.service_type] + '</span><span class="pill">' + ST[s.status] + '</span></div>' +
-        '<p><b>' + place(s.origin) + '</b>' + (s.origin_reference ? ' <span class="muted">(' + esc(s.origin_reference) + ')</span>' : '') +
-        '<br>→ ' + esc(s.destination) + '</p>' +
-        '<p>Precio: <b>' + money(s.final_price || s.proposed_price) + '</b> · Pago: ' + esc(s.payment_method) + '</p>' +
-        (s.note ? '<p class="muted">' + esc(s.note) + '</p>' : '') +
-        (c ? '<div class="details"><small class="muted">Cliente</small>' + contactHtml(c) + '</div>' : '') +
-        (acts ? '<div class="actions">' + acts + '</div>' : '') + '</div>';
-    }
+    const availCard = (s, mo) => `<div class="service-card"><div class="row"><span class="pill">${TYPE[s.service_type]}</span><b>${money(s.proposed_price)}</b></div>${routeHtml(s)}` +
+      `<p class="muted">Cliente: ${esc(s.client_name || '—')} · Pago: ${esc(s.payment_method)}</p>${s.note ? `<p class="muted">${esc(s.note)}</p>` : ''}` +
+      (mo?.status === 'pending' ? `<p>Tu oferta: <b>${money(mo.price)}</b> · esperando que el cliente elija.</p>` : '') +
+      `<div class="actions">${btn('accept', s.id, 'Aceptar ' + money(s.proposed_price))}</div>` +
+      `<div class="actions"><input type="number" min="0.5" max="500" step="0.5" placeholder="Tu oferta S/" style="max-width:170px" aria-label="Tu oferta">` +
+      `${btn('offer', s.id, mo?.status === 'pending' ? 'Actualizar oferta' : 'Enviar oferta', 'secondary')}` +
+      `${mo?.status === 'pending' ? btn('withdraw-offer', s.id, 'Retirar oferta', 'ghost') : ''}</div><small class="muted">${fdate(s.created_at)}</small></div>`;
+    const mineCard = (s, c) => `<div class="service-card">${headHtml(s)}${routeHtml(s)}` +
+      `<p>Precio: <b>${money(s.final_price || s.proposed_price)}</b> · Pago: ${esc(s.payment_method)}</p>${s.note ? `<p class="muted">${esc(s.note)}</p>` : ''}` +
+      (c ? `<div class="details"><small class="muted">Cliente</small>${contactHtml(c)}</div>` : '') +
+      (s.status === 'accepted' ? `<div class="actions">${btn('start', s.id, 'Iniciar servicio')}${btn('cancel', s.id, 'Cancelar', 'danger')}</div>` : '') +
+      (s.status === 'in_progress' ? `<div class="actions">${btn('finish', s.id, 'Finalizar servicio')}</div>` : '') + '</div>';
 
-    var lastSig = '';
-    var refresh = poll(async function (force) {
-      var r = await sb.from('services').select('*').order('created_at', { ascending: false }).limit(100);
-      if (r.error) throw r.error;
-      var ro = await sb.from('offers').select('*').eq('transporter_id', uid);
-      if (ro.error) throw ro.error;
-      var ae = document.activeElement;
-      if (!force && ae && ae.tagName === 'INPUT' && box.contains(ae)) return;
-      var offerBy = {};
-      ro.data.forEach(function (o) { offerBy[o.service_id] = o; });
-      var mine = r.data.filter(function (s) { return s.transporter_id === uid; });
-      var avail = r.data.filter(function (s) { return s.status === 'requested'; });
-      await loadContacts(mine);
-      var sig = JSON.stringify(r.data.map(function (s) { return [s.id, s.status, s.transporter_id]; })) +
-        JSON.stringify(ro.data.map(function (o) { return [o.service_id, o.price, o.status]; })) + contacts.size;
-      if (sig === lastSig && !force) return;
-      lastSig = sig;
-      box.innerHTML =
-        '<h3>Disponibles (' + avail.length + ')</h3>' +
-        (avail.length ? avail.map(function (s) { return availCard(s, offerBy[s.id]); }).join('') : '<div class="empty">' +
-          (hasSub ? 'No hay solicitudes compatibles por ahora. Se actualiza automáticamente.' :
-            'Activa tu suscripción para ver solicitudes. <a href="suscripcion.html?role=transporter">Suscripciones</a>') + '</div>') +
+    liveList(box, async () => {
+      const services = await q(sb.from('services').select('*').order('created_at', { ascending: false }).limit(100));
+      const offers = await q(sb.from('offers').select('*').eq('transporter_id', uid));
+      return { services, offers, contacts: await getContacts(services.filter(s => s.transporter_id === uid)) };
+    }, ({ services, offers, contacts }) => {
+      const avail = services.filter(s => s.status === 'requested');
+      const mine = services.filter(s => s.transporter_id === uid);
+      const byService = Object.fromEntries(offers.map(o => [o.service_id, o]));
+      return `<h3>Disponibles (${avail.length})</h3>` +
+        (avail.map(s => availCard(s, byService[s.id])).join('') || `<div class="empty">${hasSub ? 'No hay solicitudes compatibles por ahora. Se actualiza solo.' : 'Activa tu suscripción para ver solicitudes. <a href="suscripcion.html">Suscripciones</a>'}</div>`) +
         '<h3 class="section-title">Mis servicios</h3>' +
-        (mine.length ? mine.map(mineCard).join('') : '<div class="empty">Aún no has tomado servicios.</div>');
-    }, 8000);
-    bindActions(box, function () { lastSig = ''; return refresh(true); });
-  }
+        (mine.map(s => mineCard(s, contacts[s.id])).join('') || '<div class="empty">Aún no has tomado servicios.</div>');
+    });
+  };
 
-  async function complaintsPage() {
-    var g = await guard(null);
-    if (!g) return;
-    adaptNav(g.profile);
-    var f = $('#complaintForm');
-    var inp = f.elements['service_id'];
-    var sv = await sb.from('services').select('id,service_type,origin,destination,created_at')
-      .or('client_id.eq.' + g.user.id + ',transporter_id.eq.' + g.user.id).order('created_at', { ascending: false }).limit(30);
-    var sel = document.createElement('select');
-    sel.name = 'service_id';
-    sel.innerHTML = '<option value="">Ninguno</option>' + ((sv.data || []).map(function (s) {
-      return '<option value="' + s.id + '">' + TYPE[s.service_type] + ' · ' + esc(s.origin.slice(0, 30)) + ' → ' + esc(s.destination.slice(0, 30)) + ' · ' + fdate(s.created_at) + '</option>';
-    }).join(''));
-    if (inp) {
-      var lab = inp.closest('label');
-      inp.replaceWith(sel);
-      if (lab && lab.firstChild) lab.firstChild.textContent = 'Servicio relacionado (opcional)';
-    }
-    var list = document.createElement('section');
+  pages.complaints = async () => {
+    const g = await guard(null); if (!g) return;
+    const form = $('#complaintForm');
+    const services = await q(sb.from('services').select('id,service_type,origin,destination,created_at')
+      .or(`client_id.eq.${g.user.id},transporter_id.eq.${g.user.id}`).order('created_at', { ascending: false }).limit(30));
+    const input = form.elements.service_id;
+    const select = document.createElement('select');
+    select.name = 'service_id';
+    select.innerHTML = '<option value="">Ninguno</option>' + services.map(s =>
+      `<option value="${s.id}">${TYPE[s.service_type]} · ${esc(s.origin.slice(0, 30))} → ${esc(s.destination.slice(0, 30))} · ${fdate(s.created_at)}</option>`).join('');
+    const label = input.closest('label');
+    input.replaceWith(select);
+    label.firstChild.textContent = 'Servicio relacionado (opcional)';
+
+    const list = document.createElement('section');
     list.className = 'card';
     list.style.cssText = 'max-width:760px;margin-inline:auto';
-    $('main').appendChild(list);
-    async function loadList() {
-      var r = await sb.from('complaints').select('*').eq('user_id', g.user.id).order('created_at', { ascending: false }).limit(20);
-      if (r.error) throw r.error;
-      var L = { open: 'Abierto', in_review: 'En revisión', resolved: 'Resuelto' };
-      list.innerHTML = '<h2>Mis reclamos</h2>' + (r.data.length ? r.data.map(function (c) {
-        return '<div class="service-card"><div class="row"><b>' + esc(c.reason) + '</b><span class="pill">' + L[c.status] + '</span></div><p>' +
-          esc(c.description) + '</p><small class="muted">' + fdate(c.created_at) + '</small></div>';
-      }).join('') : '<div class="empty">No has enviado reclamos.</div>');
-    }
-    loadList().catch(function (e) { notice(friendly(e), true); });
-    f.addEventListener('submit', function (e) {
-      e.preventDefault();
-      withBusy(f, async function () {
-        var d = new FormData(f);
-        var r = await sb.from('complaints').insert({
-          user_id: g.user.id, reason: d.get('reason'),
-          service_id: d.get('service_id') || null, description: String(d.get('description')).trim()
-        });
-        if (r.error) throw r.error;
-        notice('Reclamo enviado. Administración lo revisará.');
-        f.reset();
-        await loadList();
+    $('main').append(list);
+    const loadList = async () => {
+      const rows = await q(sb.from('complaints').select('*').eq('user_id', g.user.id).order('created_at', { ascending: false }).limit(20));
+      const L = { open: 'Abierto', in_review: 'En revisión', resolved: 'Resuelto' };
+      list.innerHTML = '<h2>Mis reclamos</h2>' + (rows.map(c =>
+        `<div class="service-card"><div class="row"><b>${esc(c.reason)}</b><span class="pill">${L[c.status]}</span></div><p>${esc(c.description)}</p><small class="muted">${fdate(c.created_at)}</small></div>`).join('') || '<div class="empty">No has enviado reclamos.</div>');
+    };
+    loadList().catch(e => notice(friendly(e), true));
+    onSubmit(form, async d => {
+      const { error } = await sb.from('complaints').insert({
+        user_id: g.user.id, reason: d.get('reason'), service_id: d.get('service_id') || null, description: String(d.get('description')).trim()
       });
+      if (error) throw error;
+      notice('Reclamo enviado. Administración lo revisará.');
+      form.reset();
+      await loadList();
     });
-  }
+  };
 
-  async function adminPage() {
-    var g = await guard(['admin']);
-    if (!g) return;
-    adaptNav(g.profile);
+  pages.admin = async () => {
+    const g = await guard(['admin']); if (!g) return;
     $('#welcome').textContent = 'Panel de administración';
 
-    async function load() {
-      var res = await Promise.all([
-        sb.from('profiles').select('*').order('created_at', { ascending: false }).limit(1000),
-        sb.from('transporter_profiles').select('*'),
-        sb.from('subscriptions').select('*').order('created_at', { ascending: false }).limit(300),
-        sb.from('services').select('*').order('created_at', { ascending: false }).limit(200),
-        sb.from('complaints').select('*').order('created_at', { ascending: false }).limit(200),
-        sb.from('audit_log').select('*').order('created_at', { ascending: false }).limit(100),
-        sb.from('offers').select('service_id,status').limit(2000)
-      ]);
-      res.forEach(function (r) { if (r.error) throw r.error; });
-      var pr = res[0].data, tp = res[1].data, su = res[2].data, sv = res[3].data, co = res[4].data, au = res[5].data, offs = res[6].data;
-      var offCount = {};
-      offs.forEach(function (o) { if (o.status === 'pending') offCount[o.service_id] = (offCount[o.service_id] || 0) + 1; });
-      var U = new Map(pr.map(function (p) { return [p.id, p]; }));
-      var T = new Map(tp.map(function (t) { return [t.user_id, t]; }));
-      var nm = function (id) { var u = U.get(id); return u ? esc(u.full_name) : '—'; };
-      var SL = { pending: 'Pendiente', active: 'Activo', suspended: 'Suspendido', rejected: 'Rechazado' };
-      var clients = pr.filter(function (p) { return p.role === 'client'; });
-      var trs = pr.filter(function (p) { return p.role === 'transporter'; });
+    const load = async () => {
+      const get = (t, n) => q(sb.from(t).select('*').order('created_at', { ascending: false }).limit(n));
+      const [profiles, subs, services, complaints, audit, offers] = await Promise.all([
+        get('profiles', 1000), get('subscriptions', 300), get('services', 200), get('complaints', 200), get('audit_log', 100), get('offers', 2000)]);
+      const tps = await q(sb.from('transporter_profiles').select('*'));
+      const user = Object.fromEntries(profiles.map(p => [p.id, p]));
+      const tp = Object.fromEntries(tps.map(t => [t.user_id, t]));
+      const name = id => esc(user[id]?.full_name || '—');
+      const count = {}; offers.filter(o => o.status === 'pending').forEach(o => (count[o.service_id] = (count[o.service_id] || 0) + 1));
+      const list = (arr, fn) => arr.map(fn).join('') || '<div class="empty">Sin registros.</div>';
+      const row = (left, state, buttons = '') =>
+        `<div class="admin-row"><div class="row"><div>${left}</div>${state ? `<span class="pill">${state}</span>` : ''}</div>${buttons ? `<div class="actions">${buttons}</div>` : ''}</div>`;
+      const a = (act, id, v, label, cls = '') => `<button class="btn ${cls} small" data-a="${act}" data-id="${id}" data-v="${v}">${label}</button>`;
 
-      var stats = [
-        [clients.length, 'Clientes'], [trs.length, 'Transportistas'],
-        [trs.filter(function (p) { return p.account_status === 'pending'; }).length, 'Transportistas por aprobar'],
-        [su.filter(function (s) { return s.status === 'pending'; }).length, 'Pagos pendientes'],
-        [sv.length, 'Servicios'], [co.filter(function (c) { return c.status !== 'resolved'; }).length, 'Reclamos abiertos']
-      ];
-      $('#stats').innerHTML = stats.map(function (s) { return '<div class="stat"><b>' + s[0] + '</b><span>' + s[1] + '</span></div>'; }).join('');
+      const clients = profiles.filter(p => p.role === 'client'), trs = profiles.filter(p => p.role === 'transporter');
+      $('#stats').innerHTML = [
+        [clients.length, 'Clientes'], [trs.length, 'Transportistas'], [trs.filter(p => p.account_status === 'pending').length, 'Transportistas por aprobar'],
+        [subs.filter(s => s.status === 'pending').length, 'Pagos pendientes'], [services.length, 'Servicios'], [complaints.filter(c => c.status !== 'resolved').length, 'Reclamos abiertos']
+      ].map(([n, l]) => `<div class="stat"><b>${n}</b><span>${l}</span></div>`).join('');
 
-      function userRow(p) {
-        var t = T.get(p.id), btns = '';
-        var b = function (label, v, cls) { return '<button class="btn ' + (cls || '') + ' small" data-a="status" data-id="' + p.id + '" data-v="' + v + '">' + label + '</button>'; };
-        if (p.account_status !== 'active') btns += b(p.account_status === 'pending' ? 'Aprobar' : 'Activar', 'active');
-        if (p.account_status === 'pending') btns += b('Rechazar', 'rejected', 'danger');
-        if (p.account_status === 'active') btns += b('Suspender', 'suspended', 'danger');
-        return '<div class="admin-row"><div class="row"><div>' +
-          (t && t.photo_path ? '<img class="avatar" alt="" src="' + esc(photoUrl(t.photo_path)) + '"><br>' : '') +
-          '<b>' + esc(p.full_name) + '</b><small>' + esc(p.email) + ' · Cel ' + esc(p.phone) + ' · DNI ' + esc(p.dni) + ' · ' + esc(p.age) + ' años</small>' +
-          (t ? '<small>Moto: ' + esc(t.motorcycle) + ' · ' + esc(t.motorcycle_color) + ' · Placa ' + esc(t.plate) + ' · Servicios: ' + esc(t.service_types.join(', ')) + '</small>' : '') +
-          '<small>Registrado ' + fdate(p.created_at) + '</small></div><span class="pill">' + SL[p.account_status] + '</span></div>' +
-          (btns ? '<div class="actions">' + btns + '</div>' : '') + '</div>';
-      }
-      var empty = '<div class="empty">Sin registros.</div>';
-      $('#adminClients').innerHTML = clients.length ? clients.map(userRow).join('') : empty;
-      $('#adminTransporters').innerHTML = trs.length ? trs.map(userRow).join('') : empty;
+      const SL = { pending: 'Pendiente', active: 'Activo', suspended: 'Suspendido', rejected: 'Rechazado' };
+      const userRow = p => {
+        const t = tp[p.id];
+        return row(
+          (t?.photo_path ? `<img class="avatar" alt="" src="${esc(photoUrl(t.photo_path))}"><br>` : '') +
+          `<b>${esc(p.full_name)}</b><small>${esc(p.email)} · Cel ${esc(p.phone)} · DNI ${esc(p.dni)} · ${esc(p.age)} años</small>` +
+          (t ? `<small>Moto: ${esc(t.motorcycle)} · ${esc(t.motorcycle_color)} · Placa ${esc(t.plate)} · Servicios: ${esc(t.service_types.join(', '))}</small>` : '') +
+          `<small>Registrado ${fdate(p.created_at)}</small>`, SL[p.account_status],
+          (p.account_status !== 'active' ? a('status', p.id, 'active', p.account_status === 'pending' ? 'Aprobar' : 'Activar') : '') +
+          (p.account_status === 'pending' ? a('status', p.id, 'rejected', 'Rechazar', 'danger') : '') +
+          (p.account_status === 'active' ? a('status', p.id, 'suspended', 'Suspender', 'danger') : ''));
+      };
+      $('#adminClients').innerHTML = list(clients, userRow);
+      $('#adminTransporters').innerHTML = list(trs, userRow);
 
-      var SS = { pending: 'En revisión', active: 'Activa', rejected: 'Rechazada' };
-      var ordered = su.slice().sort(function (a, b) { return (b.status === 'pending') - (a.status === 'pending'); });
-      $('#adminSubscriptions').innerHTML = ordered.length ? ordered.map(function (s) {
-        var u = U.get(s.user_id);
-        return '<div class="admin-row"><div class="row"><div><b>' + nm(s.user_id) + '</b> <small>(' + (u && u.role === 'client' ? 'cliente' : 'transportista') + ') · ' +
-          (s.plan === 'weekly' ? 'Semanal' : 'Mensual') + ' · ' + money(s.amount) + '</small><small>Solicitada ' + fdate(s.created_at) +
-          (s.status === 'active' ? ' · vence ' + fdate(s.expires_at) : '') + '</small></div><span class="pill">' + SS[s.status] + '</span></div>' +
-          (s.status === 'pending' ? '<div class="actions"><button class="btn small" data-a="sub" data-id="' + s.id + '" data-v="1">Aprobar pago</button>' +
-            '<button class="btn danger small" data-a="sub" data-id="' + s.id + '" data-v="0">Rechazar</button></div>' : '') + '</div>';
-      }).join('') : empty;
+      const SS = { pending: 'En revisión', active: 'Activa', rejected: 'Rechazada' };
+      $('#adminSubscriptions').innerHTML = list([...subs].sort((x, y) => (y.status === 'pending') - (x.status === 'pending')), s =>
+        row(`<b>${name(s.user_id)}</b> <small>(${user[s.user_id]?.role === 'client' ? 'cliente' : 'transportista'}) · ${s.plan === 'weekly' ? 'Semanal' : 'Mensual'} · ${money(s.amount)}</small>` +
+          `<small>Solicitada ${fdate(s.created_at)}${s.status === 'active' ? ' · vence ' + fdate(s.expires_at) : ''}</small>`, SS[s.status],
+          s.status === 'pending' ? a('sub', s.id, 1, 'Aprobar pago') + a('sub', s.id, 0, 'Rechazar', 'danger') : ''));
 
-      $('#adminServices').innerHTML = sv.length ? sv.map(function (s) {
-        return '<div class="admin-row"><div class="row"><div><b>' + TYPE[s.service_type] + '</b> · ' + esc(s.origin) + ' → ' + esc(s.destination) +
-          '<small>Cliente: ' + nm(s.client_id) + ' · Transportista: ' + nm(s.transporter_id) + ' · ' + money(s.final_price || s.proposed_price) +
-          ' · ' + esc(s.payment_method) + (s.status === 'requested' ? ' · Ofertas: ' + (offCount[s.id] || 0) : '') + ' · ' + fdate(s.created_at) + '</small><small>ID: ' + s.id + '</small></div><span class="pill">' + ST[s.status] + '</span></div></div>';
-      }).join('') : empty;
+      $('#adminServices').innerHTML = list(services, s =>
+        row(`<b>${TYPE[s.service_type]}</b> · ${esc(s.origin)} → ${esc(s.destination)}<small>Cliente: ${name(s.client_id)} · Transportista: ${name(s.transporter_id)} · ${money(s.final_price || s.proposed_price)} · ${esc(s.payment_method)}` +
+          `${s.status === 'requested' ? ' · Ofertas: ' + (count[s.id] || 0) : ''} · ${fdate(s.created_at)}</small><small>ID: ${s.id}</small>`, STATUS[s.status]));
 
-      var CL = { open: 'Abierto', in_review: 'En revisión', resolved: 'Resuelto' };
-      $('#adminComplaints').innerHTML = co.length ? co.map(function (c) {
-        return '<div class="admin-row"><div class="row"><div><b>' + esc(c.reason) + '</b> · ' + nm(c.user_id) +
-          '<small>' + fdate(c.created_at) + (c.service_id ? ' · Servicio ' + c.service_id : '') + '</small></div><span class="pill">' + CL[c.status] + '</span></div><p>' +
-          esc(c.description) + '</p><div class="actions">' +
-          (c.status === 'open' ? '<button class="btn ghost small" data-a="comp" data-id="' + c.id + '" data-v="in_review">En revisión</button>' : '') +
-          (c.status !== 'resolved' ? '<button class="btn small" data-a="comp" data-id="' + c.id + '" data-v="resolved">Marcar resuelto</button>' : '') + '</div></div>';
-      }).join('') : empty;
+      const CL = { open: 'Abierto', in_review: 'En revisión', resolved: 'Resuelto' };
+      $('#adminComplaints').innerHTML = list(complaints, c =>
+        row(`<b>${esc(c.reason)}</b> · ${name(c.user_id)}<small>${fdate(c.created_at)}${c.service_id ? ' · Servicio ' + c.service_id : ''}</small><p>${esc(c.description)}</p>`, CL[c.status],
+          (c.status === 'open' ? a('comp', c.id, 'in_review', 'En revisión', 'ghost') : '') + (c.status !== 'resolved' ? a('comp', c.id, 'resolved', 'Marcar resuelto') : '')));
 
-      var AL = { account_status: 'Cambio de estado de cuenta', subscription_approved: 'Pago aprobado',
-        subscription_rejected: 'Pago rechazado', complaint_status: 'Estado de reclamo' };
-      var auEl = $('#adminAudit');
-      if (auEl) auEl.innerHTML = au.length ? au.map(function (a) {
-        var d = a.detail || {}, tgt = a.target_type === 'user' ? nm(a.target_id) : (d.user_id ? nm(d.user_id) : String(a.target_id || '').slice(0, 8));
-        var det = d.to ? (d.from ? esc(d.from) + ' → ' + esc(d.to) : esc(d.to)) : (d.plan ? esc(d.plan) + ' · ' + money(d.amount) : '');
-        return '<div class="admin-row"><div class="row"><div><b>' + (AL[a.action] || esc(a.action)) + '</b><small>' + fdate(a.created_at) +
-          ' · Admin: ' + nm(a.admin_id) + ' · Objetivo: ' + tgt + (det ? ' · ' + det : '') + '</small></div></div></div>';
-      }).join('') : empty;
-    }
+      const AL = { account_status: 'Cambio de estado de cuenta', subscription_approved: 'Pago aprobado', subscription_rejected: 'Pago rechazado', complaint_status: 'Estado de reclamo' };
+      $('#adminAudit').innerHTML = list(audit, x => {
+        const d = x.detail || {};
+        const target = x.target_type === 'user' ? name(x.target_id) : d.user_id ? name(d.user_id) : String(x.target_id || '').slice(0, 8);
+        const info = d.to ? (d.from ? `${esc(d.from)} → ${esc(d.to)}` : esc(d.to)) : d.plan ? `${esc(d.plan)} · ${money(d.amount)}` : '';
+        return row(`<b>${AL[x.action] || esc(x.action)}</b><small>${fdate(x.created_at)} · Admin: ${name(x.admin_id)} · Objetivo: ${target}${info ? ' · ' + info : ''}</small>`, '');
+      });
+    };
 
-    $('main').addEventListener('click', async function (e) {
-      var b = e.target.closest('button[data-a]');
-      if (!b) return;
-      var a = b.dataset.a, id = b.dataset.id, v = b.dataset.v;
-      if (a === 'status' && (v === 'suspended' || v === 'rejected') && !confirm('¿Confirmas esta acción sobre la cuenta?')) return;
+    $('main').addEventListener('click', async e => {
+      const b = e.target.closest('button[data-a]'); if (!b) return;
+      const { a, id, v } = b.dataset;
+      if (a === 'status' && ['suspended', 'rejected'].includes(v) && !confirm('¿Confirmas esta acción sobre la cuenta?')) return;
       b.disabled = true;
       try {
-        if (a === 'status') {
-          await rpc('admin_set_account_status', { p_user: id, p_status: v });
-        } else if (a === 'sub') {
-          await rpc('admin_review_subscription', { p_id: id, p_approve: v === '1' });
-        } else if (a === 'comp') {
-          await rpc('admin_set_complaint_status', { p_id: id, p_status: v });
-        }
+        if (a === 'status') await rpc('admin_set_account_status', { p_user: id, p_status: v });
+        if (a === 'sub') await rpc('admin_review_subscription', { p_id: id, p_approve: v === '1' });
+        if (a === 'comp') await rpc('admin_set_complaint_status', { p_id: id, p_status: v });
         notice('Cambio guardado.');
         await load();
       } catch (err) { notice(friendly(err), true); b.disabled = false; }
     });
-
     await load();
-  }
+  };
 
-  /* ---------- arranque ---------- */
-  function start() {
-    if (!window.supabase || !C.SUPABASE_URL || !C.SUPABASE_KEY || /PEGA_AQUI/.test(C.SUPABASE_KEY)) {
-      notice('Configuración incompleta: falta la clave pública en js/config.js.', true);
-      return;
-    }
-    sb = window.supabase.createClient(C.SUPABASE_URL, C.SUPABASE_KEY);
-    document.addEventListener('click', async function (e) {
-      var b = e.target.closest('[data-logout]');
-      if (!b) return;
+  /* ============ 5. ARRANQUE ============ */
+  document.addEventListener('click', async e => {
+    if (e.target.closest('[data-logout]')) {
       e.preventDefault();
       await sb.auth.signOut();
       location.href = 'index.html';
-    });
-    var routes = {
-      home: homePage, login: loginPage,
-      'register-client': function () { return regPage('client'); },
-      'register-transporter': function () { return regPage('transporter'); },
-      subscription: subscriptionPage, client: clientPage, transporter: transporterPage,
-      admin: adminPage, complaints: complaintsPage
-    };
-    Promise.resolve((routes[page] || function () { })()).catch(function (e) { console.error(e); notice(friendly(e), true); });
-  }
-  start();
+    }
+    const c = e.target.closest('[data-copy]');            // botón "Copiar" (número de Yape)
+    if (c) {
+      const text = $(c.dataset.copy).textContent.trim();
+      try { await navigator.clipboard.writeText(text); }
+      catch { const t = document.createElement('textarea'); t.value = text; document.body.append(t); t.select(); document.execCommand('copy'); t.remove(); }
+      const old = c.textContent; c.textContent = '✅ Copiado';
+      setTimeout(() => (c.textContent = old), 2000);
+    }
+  });
+
+  (async () => {
+    window.lanzecSetLogged?.(!!(await getSession()));
+    await pages[page]?.();
+  })().catch(e => { console.error(e); notice(friendly(e), true); });
 })();
