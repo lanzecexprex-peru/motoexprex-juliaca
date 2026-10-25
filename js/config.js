@@ -7,3 +7,4 @@ window.LANZEC_CONFIG = {
   YAPE_PHONE: '963334595',
   YAPE_HOLDER: 'Alex C.V.'
 };
+
