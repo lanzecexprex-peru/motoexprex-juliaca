@@ -23,7 +23,24 @@
 </header>
 <div id="notice" class="notice" hidden></div>
 <main class="shell">
-<h1 id="welcome">Panel de administración</h1><p class="muted">Solo usuarios autorizados como administradores en Supabase deben tener acceso a este panel.</p><div id="stats" class="grid three"></div><h2 class="section-title">Clientes</h2><div id="adminClients"></div><h2 class="section-title">Transportistas</h2><div id="adminTransporters"></div><h2 class="section-title">Pagos y suscripciones</h2><div id="adminSubscriptions"></div><h2 class="section-title">Servicios</h2><div id="adminServices"></div><h2 class="section-title">Reclamos</h2><div id="adminComplaints"></div><h2 class="section-title">Registro de auditoría</h2><div id="adminAudit"></div><p class="note">La aprobación de transportista y la activación de suscripción son procesos independientes.</p>
+<h1 id="welcome">Panel de administración</h1>
+<p class="muted">Gestiona clientes y transportistas: ve sus datos, su suscripción, y actívalos o páusalos.</p>
+<div id="stats" class="grid three"></div>
+<div class="tabs" id="tabs">
+  <button class="tab active" data-tab="clients">Clientes</button>
+  <button class="tab" data-tab="transporters">Transportistas</button>
+  <button class="tab" data-tab="payments">Pagos</button>
+  <button class="tab" data-tab="services">Servicios</button>
+  <button class="tab" data-tab="complaints">Reclamos</button>
+  <button class="tab" data-tab="audit">Auditoría</button>
+</div>
+<section id="tab-clients"><input class="search" type="search" data-search="adminClients" placeholder="Buscar cliente por nombre, DNI, celular o correo"><div id="adminClients"></div></section>
+<section id="tab-transporters" hidden><input class="search" type="search" data-search="adminTransporters" placeholder="Buscar transportista por nombre, DNI, placa, celular o correo"><div id="adminTransporters"></div></section>
+<section id="tab-payments" hidden><div id="adminSubscriptions"></div></section>
+<section id="tab-services" hidden><div id="adminServices"></div></section>
+<section id="tab-complaints" hidden><div id="adminComplaints"></div></section>
+<section id="tab-audit" hidden><div id="adminAudit"></div></section>
+<p class="note">La aprobación de la cuenta y la suscripción son independientes: "Pausar cuenta" bloquea todo el acceso; "Pausar suscripción" congela los días restantes.</p>
 </main>
 <footer class="footer">© 2026 LANZEC MOTO EXPRESS · Juliaca, Perú</footer>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4"></script>
