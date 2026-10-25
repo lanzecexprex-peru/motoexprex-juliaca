@@ -89,3 +89,22 @@ html.logged [data-auth=out]{display:none!important}
 @media(max-width:760px){.steps{grid-template-columns:1fr 1fr}}
 @media(max-width:480px){.steps{grid-template-columns:1fr}}
 #subscriptionForm{margin-top:16px}
+
+/* ---- panel admin ---- */
+.tabs{display:flex;gap:8px;flex-wrap:wrap;margin:26px 0 10px}
+.tab{background:#0c1c2e;color:var(--muted);border:1px solid var(--line);border-radius:99px;padding:9px 15px;font:inherit;font-weight:700;cursor:pointer}
+.tab.active{background:linear-gradient(90deg,var(--blue),#16bde3);color:#fff;border-color:transparent}
+.search{margin:6px 0 8px}
+details.user{border:1px solid var(--line);background:#0b1a2b;border-radius:14px;margin:10px 0}
+details.user>summary{cursor:pointer;padding:14px 16px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;list-style:none}
+details.user>summary::-webkit-details-marker{display:none}
+details.user[open]>summary{border-bottom:1px solid var(--line)}
+.uname{font-weight:800;flex:1;min-width:150px}
+.udetail{padding:14px 16px;display:grid;gap:12px}
+.kv{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px 18px}
+.kv p{margin:0}
+.udetail h4{margin:6px 0 0;color:var(--cyan)}
+.pill.good{color:#4ade80;border-color:#2f7a4a}
+.pill.warn{color:#fbbf24;border-color:#8a6a1c}
+.pill.bad{color:var(--red);border-color:#a83c55}
+@media(max-width:760px){.kv{grid-template-columns:1fr}}
