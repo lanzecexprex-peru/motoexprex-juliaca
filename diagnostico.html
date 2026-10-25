@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Diagnóstico | LANZEC MOTO EXPRESS</title>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="index.html">LANZEC <span>MOTO EXPRESS</span></a>
+  <nav><a class="btn ghost small" href="index.html">Inicio</a><a class="btn ghost small" href="login.html">Iniciar sesión</a></nav>
+</header>
+<main class="shell">
+  <section class="card">
+    <h1>Diagnóstico de la conexión</h1>
+    <p class="muted">Comprueba si este sitio está bien conectado a tu base de datos de Supabase. No muestra datos personales.</p>
+    <div id="out"><div class="empty">Comprobando…</div></div>
+    <button class="btn ghost" onclick="location.reload()">Volver a comprobar</button>
+  </section>
+</main>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4"></script>
+<script src="js/config.js"></script>
+<script>
+(async function () {
+  var out = document.getElementById('out'), C = window.LANZEC_CONFIG || {}, rows = [], todo = [];
+  var ok = function (t, d) { rows.push(['✅', t, d || '']); };
+  var bad = function (t, d, fix) { rows.push(['❌', t, d || '']); if (fix) todo.push(fix); };
+  var warn = function (t, d, fix) { rows.push(['⚠️', t, d || '']); if (fix) todo.push(fix); };
+  var esc = function (v) { return String(v).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); };
+  function show() {
+    out.innerHTML = rows.map(function (r) { return '<div class="service-card"><b>' + r[0] + ' ' + esc(r[1]) + '</b>' + (r[2] ? '<p class="muted" style="margin:6px 0 0">' + r[2] + '</p>' : '') + '</div>'; }).join('') +
+      (todo.length ? '<h2 class="section-title">Qué hacer</h2><ol class="how">' + todo.map(function (t) { return '<li>' + t + '</li>'; }).join('') + '</ol>' :
+        '<p class="note">Todo está bien. Ya puedes registrarte, convertir tu cuenta en administrador e iniciar sesión.</p>');
+  }
+  var ref = '';
+  try { ref = new URL(C.SUPABASE_URL).hostname.split('.')[0]; } catch (e) {}
+  if (!ref || !C.SUPABASE_KEY || /PEGA_AQUI/.test(C.SUPABASE_KEY)) { bad('Configuración', 'Falta la URL o la clave en js/config.js.', 'Completa <code>SUPABASE_URL</code> y <code>SUPABASE_KEY</code> en <code>js/config.js</code>.'); show(); return; }
+  ok('Este sitio usa el proyecto de Supabase:', '<b>' + esc(ref) + '</b> (debe coincidir con el "Reference ID" en Supabase > Project Settings > General)');
+
+  // 1) ¿el proyecto responde? ¿confirmación de correo?
+  try {
+    var r = await fetch(C.SUPABASE_URL + '/auth/v1/settings', { headers: { apikey: C.SUPABASE_KEY } });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    var st = await r.json();
+    ok('El proyecto responde y la clave es válida.');
+    if (st.mailer_autoconfirm) ok('Confirmación de correo: DESACTIVADA (no se envían correos).');
+    else warn('Confirmación de correo: ACTIVADA.', 'Los usuarios no podrán entrar hasta confirmar su correo.', 'En Supabase: Authentication > Sign In / Providers > Email: desactiva <b>Confirm email</b> y guarda.');
+  } catch (e) {
+    bad('No se pudo conectar con el proyecto.', esc(e.message || e), 'Revisa que <code>SUPABASE_URL</code> y <code>SUPABASE_KEY</code> en <code>js/config.js</code> sean de <b>el mismo proyecto</b>.');
+    show(); return;
+  }
+
+  // 2) ¿está instalada la base de datos?
+  var sb = window.supabase.createClient(C.SUPABASE_URL, C.SUPABASE_KEY);
+  var res = await sb.rpc('lanzec_diagnostico');
+  if (res.error) {
+    bad('La base de datos de LANZEC NO está instalada en este proyecto.', esc(res.error.message),
+      'Abre <b>SQL Editor</b> en el proyecto <b>' + esc(ref) + '</b> (compruébalo arriba a la izquierda en Supabase), pega TODO el archivo <code>supabase/INSTALAR-DESDE-CERO.sql</code> y pulsa <b>Run</b>. Debe terminar en "Success". Luego pulsa "Volver a comprobar".');
+    show(); return;
+  }
+  var d = res.data, names = { profiles: 'Perfiles', transporter_profiles: 'Datos de transportistas', subscriptions: 'Suscripciones', services: 'Servicios', offers: 'Ofertas', complaints: 'Reclamos', audit_log: 'Auditoría' };
+  var missing = [], noperm = [];
+  Object.keys(names).forEach(function (t) { if (!d.tablas[t]) missing.push(names[t]); else if (!d.permisos_authenticated[t]) noperm.push(t); });
+  if (missing.length) bad('Faltan tablas: ' + missing.join(', ') + '.', '', 'Ejecuta <code>supabase/INSTALAR-DESDE-CERO.sql</code> completo en el proyecto <b>' + esc(ref) + '</b>.');
+  else ok('Las 7 tablas existen.');
+  if (noperm.length) bad('Faltan permisos en: ' + noperm.join(', ') + '.', 'Por eso la web puede decir "Could not find the table … in the schema cache".',
+    'En SQL Editor ejecuta: <code>grant usage on schema public to anon, authenticated; grant select, insert, update, delete on all tables in schema public to authenticated; notify pgrst, \'reload schema\';</code>');
+  else if (!missing.length) ok('Los permisos de la API están correctos.');
+  if (d.trigger_registro) ok('El registro automático de perfiles está activo.');
+  else bad('Falta el disparador que crea el perfil al registrarse.', '', 'Ejecuta <code>supabase/schema.sql</code> completo.');
+  if (d.usuarios_auth > d.perfiles) warn('Hay ' + (d.usuarios_auth - d.perfiles) + ' usuario(s) sin perfil (se registraron antes de instalar la base de datos).', 'No podrán entrar.', 'En Supabase: Authentication > Users: borra esos usuarios y regístrate de nuevo.');
+  else ok('Usuarios registrados: ' + d.usuarios_auth + ' · Perfiles: ' + d.perfiles + '.');
+  if (d.admins > 0) ok('Hay ' + d.admins + ' administrador(es).');
+  else warn('Todavía no hay administrador.', '', 'Regístrate en <code>registro-cliente.html</code> y ejecuta en SQL Editor: <code>update public.profiles set role=\'admin\', account_status=\'active\' where email=\'TU_CORREO\';</code>');
+  if (d.bucket_fotos) ok('Almacenamiento de fotos de perfil listo.');
+  else warn('Falta el almacenamiento de fotos.', 'Solo afecta la foto de perfil de los transportistas.', 'En Supabase: Storage > New bucket: nombre <code>profile-photos</code>, público.');
+  show();
+})();
+</script>
+</body>
+</html>
