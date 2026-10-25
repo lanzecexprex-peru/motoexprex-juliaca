@@ -3,8 +3,6 @@
 -- Ejecutar completo en Supabase > SQL Editor > New query > Run
 -- =====================================================================
 
-create extension if not exists pgcrypto;
-
 -- ---------------------------------------------------------------------
 -- TABLAS
 -- ---------------------------------------------------------------------
@@ -38,7 +36,8 @@ create table if not exists public.subscriptions (
   plan        text not null check (plan in ('weekly','monthly')),
   amount      numeric(8,2) not null,
   days        int not null,
-  status      text not null default 'pending' check (status in ('pending','active','rejected')),
+  status      text not null default 'pending' check (status in ('pending','active','paused','expired','rejected')),
+  paused_remaining_seconds bigint,
   starts_at   timestamptz,
   expires_at  timestamptz,
   reviewed_by uuid references public.profiles(id),
@@ -47,6 +46,12 @@ create table if not exists public.subscriptions (
 );
 create unique index if not exists one_pending_sub_per_user on public.subscriptions(user_id) where status = 'pending';
 create index if not exists subs_user_status_idx on public.subscriptions(user_id, status);
+
+-- Migración: estados 'paused' y 'expired' + tiempo restante al pausar
+alter table public.subscriptions add column if not exists paused_remaining_seconds bigint;
+alter table public.subscriptions drop constraint if exists subscriptions_status_check;
+alter table public.subscriptions add constraint subscriptions_status_check
+  check (status in ('pending','active','paused','expired','rejected'));
 
 create table if not exists public.services (
   id              uuid primary key default gen_random_uuid(),
@@ -210,20 +215,34 @@ exception when unique_violation then
   raise exception 'Ya tienes una solicitud pendiente de revisión.';
 end $$;
 
-create or replace function public.admin_review_subscription(p_id uuid, p_approve boolean) returns void
+-- Uso interno: activa una solicitud. Suma los días al vencimiento vigente y deja UNA sola suscripción activa.
+create or replace function public._activate_sub(p_id uuid) returns void
 language plpgsql security definer set search_path = public as $$
 declare s public.subscriptions%rowtype; base timestamptz;
+begin
+  select * into s from public.subscriptions where id = p_id for update;
+  if exists (select 1 from public.subscriptions where user_id = s.user_id and status = 'paused') then
+    raise exception 'Esta cuenta tiene una suscripción pausada. Reanúdala antes de activar otra.';
+  end if;
+  select coalesce(max(expires_at), now()) into base
+    from public.subscriptions where user_id = s.user_id and status = 'active' and expires_at > now();
+  update public.subscriptions set status = 'expired'
+   where user_id = s.user_id and status = 'active' and id <> p_id;
+  update public.subscriptions
+     set status = 'active', starts_at = now(), expires_at = base + make_interval(days => s.days),
+         reviewed_by = auth.uid(), reviewed_at = now()
+   where id = p_id;
+end $$;
+
+create or replace function public.admin_review_subscription(p_id uuid, p_approve boolean) returns void
+language plpgsql security definer set search_path = public as $$
+declare s public.subscriptions%rowtype;
 begin
   if not public.is_admin() then raise exception 'No autorizado.'; end if;
   select * into s from public.subscriptions where id = p_id and status = 'pending' for update;
   if not found then raise exception 'Solicitud no encontrada o ya revisada.'; end if;
   if p_approve then
-    select coalesce(max(expires_at), now()) into base
-      from public.subscriptions where user_id = s.user_id and status = 'active' and expires_at > now();
-    update public.subscriptions
-       set status = 'active', starts_at = base, expires_at = base + make_interval(days => s.days),
-           reviewed_by = auth.uid(), reviewed_at = now()
-     where id = p_id;
+    perform public._activate_sub(p_id);
   else
     update public.subscriptions
        set status = 'rejected', reviewed_by = auth.uid(), reviewed_at = now()
@@ -233,6 +252,53 @@ begin
   values (auth.uid(), case when p_approve then 'subscription_approved' else 'subscription_rejected' end,
           'subscription', p_id,
           jsonb_build_object('user_id', s.user_id, 'plan', s.plan, 'amount', s.amount));
+end $$;
+
+-- Pausar / reanudar la suscripción de un usuario (se conserva el tiempo restante)
+create or replace function public.admin_set_subscription_paused(p_user uuid, p_pause boolean) returns void
+language plpgsql security definer set search_path = public as $$
+begin
+  if not public.is_admin() then raise exception 'No autorizado.'; end if;
+  if p_pause then
+    update public.subscriptions
+       set status = 'paused',
+           paused_remaining_seconds = greatest(extract(epoch from (expires_at - now()))::bigint, 0)
+     where user_id = p_user and status = 'active' and expires_at > now();
+    if not found then raise exception 'No hay una suscripción activa para pausar.'; end if;
+  else
+    update public.subscriptions
+       set status = 'active',
+           expires_at = now() + (coalesce(paused_remaining_seconds, 0) * interval '1 second'),
+           paused_remaining_seconds = null
+     where user_id = p_user and status = 'paused';
+    if not found then raise exception 'No hay una suscripción pausada para reanudar.'; end if;
+  end if;
+  insert into public.audit_log(admin_id, action, target_type, target_id, detail)
+  values (auth.uid(), case when p_pause then 'subscription_paused' else 'subscription_resumed' end,
+          'user', p_user, '{}'::jsonb);
+end $$;
+
+-- Activación manual (p. ej. pago en efectivo): plan semanal o mensual
+create or replace function public.admin_grant_subscription(p_user uuid, p_plan text) returns void
+language plpgsql security definer set search_path = public as $$
+declare r text; a numeric; d int; sid uuid;
+begin
+  if not public.is_admin() then raise exception 'No autorizado.'; end if;
+  if p_plan not in ('weekly','monthly') then raise exception 'Plan inválido.'; end if;
+  select role into r from public.profiles where id = p_user;
+  if r is null or r = 'admin' then raise exception 'Usuario no válido para suscripción.'; end if;
+  a := case when r = 'client' then (case p_plan when 'weekly' then 2 else 10 end)
+                              else (case p_plan when 'weekly' then 8 else 25 end) end;
+  d := case p_plan when 'weekly' then 7 else 30 end;
+  select id into sid from public.subscriptions where user_id = p_user and status = 'pending' limit 1;
+  if sid is null then
+    insert into public.subscriptions(user_id, plan, amount, days) values (p_user, p_plan, a, d) returning id into sid;
+  else
+    update public.subscriptions set plan = p_plan, amount = a, days = d where id = sid;
+  end if;
+  perform public._activate_sub(sid);
+  insert into public.audit_log(admin_id, action, target_type, target_id, detail)
+  values (auth.uid(), 'subscription_granted', 'user', p_user, jsonb_build_object('plan', p_plan, 'amount', a));
 end $$;
 
 create or replace function public.admin_set_account_status(p_user uuid, p_status text) returns void
@@ -471,6 +537,11 @@ create policy audit_select on public.audit_log for select to authenticated using
 -- ---------------------------------------------------------------------
 revoke all on all tables in schema public from anon;
 
+-- Permisos explícitos para la API (RLS decide qué filas ve cada usuario).
+-- Sin esto, algunos proyectos devuelven "Could not find the table ... in the schema cache".
+grant usage on schema public to anon, authenticated;
+grant select, insert, update, delete on all tables in schema public to authenticated;
+
 revoke all on function public.is_admin()                      from public, anon;
 revoke all on function public.has_active_sub(uuid)            from public, anon;
 revoke all on function public.can_serve(text)                 from public, anon;
@@ -479,6 +550,9 @@ revoke all on function public.handle_new_user()               from public, anon,
 revoke all on function public.services_before_insert()        from public, anon, authenticated;
 revoke all on function public.request_subscription(text)      from public, anon;
 revoke all on function public.admin_review_subscription(uuid, boolean) from public, anon;
+revoke all on function public._activate_sub(uuid)             from public, anon, authenticated;
+revoke all on function public.admin_set_subscription_paused(uuid, boolean) from public, anon;
+revoke all on function public.admin_grant_subscription(uuid, text) from public, anon;
 revoke all on function public.admin_set_account_status(uuid, text) from public, anon;
 revoke all on function public.admin_set_complaint_status(uuid, text) from public, anon;
 revoke all on function public.accept_service(uuid)            from public, anon;
@@ -496,6 +570,8 @@ grant execute on function public.can_serve(text)                 to authenticate
 grant execute on function public.open_services_count(uuid)       to authenticated;
 grant execute on function public.request_subscription(text)      to authenticated;
 grant execute on function public.admin_review_subscription(uuid, boolean) to authenticated;
+grant execute on function public.admin_set_subscription_paused(uuid, boolean) to authenticated;
+grant execute on function public.admin_grant_subscription(uuid, text) to authenticated;
 grant execute on function public.admin_set_account_status(uuid, text) to authenticated;
 grant execute on function public.admin_set_complaint_status(uuid, text) to authenticated;
 grant execute on function public.accept_service(uuid)            to authenticated;
@@ -510,20 +586,57 @@ grant execute on function public.set_my_photo(text)              to authenticate
 -- ---------------------------------------------------------------------
 -- STORAGE: fotos de perfil (máx 5 MB, solo imágenes, carpeta = id del usuario)
 -- ---------------------------------------------------------------------
-insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
-values ('profile-photos', 'profile-photos', true, 5242880, array['image/jpeg','image/png','image/webp'])
-on conflict (id) do update
-  set public = excluded.public,
-      file_size_limit = excluded.file_size_limit,
-      allowed_mime_types = excluded.allowed_mime_types;
+do $$
+begin
+  insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+  values ('profile-photos', 'profile-photos', true, 5242880, array['image/jpeg','image/png','image/webp'])
+  on conflict (id) do update
+    set public = excluded.public,
+        file_size_limit = excluded.file_size_limit,
+        allowed_mime_types = excluded.allowed_mime_types;
 
-drop policy if exists profile_photos_insert on storage.objects;
-create policy profile_photos_insert on storage.objects for insert to authenticated
-  with check (bucket_id = 'profile-photos' and (storage.foldername(name))[1] = auth.uid()::text);
+  drop policy if exists profile_photos_insert on storage.objects;
+  create policy profile_photos_insert on storage.objects for insert to authenticated
+    with check (bucket_id = 'profile-photos' and (storage.foldername(name))[1] = auth.uid()::text);
+exception when others then
+  raise notice 'Almacenamiento de fotos no configurado: %. Créalo a mano: Storage > New bucket "profile-photos" (público).', sqlerrm;
+end $$;
+
+-- ---------------------------------------------------------------------
+-- DIAGNÓSTICO (lo usa diagnostico.html; no expone datos personales)
+-- ---------------------------------------------------------------------
+create or replace function public.lanzec_diagnostico() returns jsonb
+language plpgsql stable security definer set search_path = public as $$
+declare
+  t text; res jsonb := '{}'::jsonb; tablas jsonb := '{}'::jsonb; permisos jsonb := '{}'::jsonb;
+  n bigint; admins bigint := 0; perfiles bigint := 0; usuarios bigint := 0;
+begin
+  foreach t in array array['profiles','transporter_profiles','subscriptions','services','offers','complaints','audit_log'] loop
+    tablas := tablas || jsonb_build_object(t, to_regclass('public.' || t) is not null);
+    permisos := permisos || jsonb_build_object(t,
+      case when to_regclass('public.' || t) is null then false
+           else has_table_privilege('authenticated', 'public.' || t, 'select') end);
+  end loop;
+  if to_regclass('public.profiles') is not null then
+    execute 'select count(*) from public.profiles' into perfiles;
+    execute 'select count(*) from public.profiles where role = ''admin''' into admins;
+  end if;
+  select count(*) into usuarios from auth.users;
+  res := jsonb_build_object(
+    'tablas', tablas,
+    'permisos_authenticated', permisos,
+    'trigger_registro', exists(select 1 from pg_trigger where tgname = 'on_auth_user_created' and not tgisinternal),
+    'usuarios_auth', usuarios,
+    'perfiles', perfiles,
+    'admins', admins,
+    'bucket_fotos', exists(select 1 from storage.buckets where id = 'profile-photos'));
+  return res;
+end $$;
+revoke all on function public.lanzec_diagnostico() from public;
+grant execute on function public.lanzec_diagnostico() to anon, authenticated;
 
 -- =====================================================================
 -- DESPUÉS de registrar tu cuenta de administrador, ejecuta (con tu correo):
 --   update public.profiles set role='admin', account_status='active' where email='TU_CORREO_ADMIN';
 -- =====================================================================
--e 
 notify pgrst, 'reload schema';
