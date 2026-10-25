@@ -40,6 +40,7 @@
     [/Database error saving new user/i, 'No se pudo crear la cuenta. Verifica que el DNI no esté ya registrado.'],
     [/rate limit|too many/i, 'Demasiados intentos. Espera unos minutos.'],
     [/row-level security|permission denied/i, 'No tienes permiso para esta acción. Revisa que tu cuenta esté aprobada y tu suscripción activa.'],
+    [/schema cache|Could not find the (table|function)/i, 'La base de datos de este proyecto no está instalada o no está visible. Abre diagnostico.html para ver qué falta.'],
     [/Failed to fetch|NetworkError|Load failed/i, 'Sin conexión con el servidor. Inténtalo de nuevo.']
   ];
   const friendly = e => { const m = e?.message || String(e); return (ERRORS.find(([re]) => re.test(m)) || [])[1] || m; };
@@ -91,8 +92,10 @@
   let cdTimer;
   async function countdown(uid) {
     const el = $('#countdown');
-    const rows = await q(sb.from('subscriptions').select('expires_at').eq('user_id', uid).eq('status', 'active')
+    const rows = await q(sb.from('subscriptions').select('status,expires_at').eq('user_id', uid).in('status', ['active', 'paused'])
       .order('expires_at', { ascending: false }).limit(1));
+    clearInterval(cdTimer);
+    if (rows[0]?.status === 'paused') { if (el) el.textContent = 'Pausada por administración'; return false; }
     const exp = rows[0] ? new Date(rows[0].expires_at) : null;
     const tick = () => {
       const ms = exp ? exp - Date.now() : 0;
@@ -101,7 +104,6 @@
       if (el) el.textContent = `${d}d ${pad(h)}:${pad(m)}:${pad(s)}`;
       return true;
     };
-    clearInterval(cdTimer);
     const active = tick();
     if (active) cdTimer = setInterval(() => tick() || clearInterval(cdTimer), 1000);
     return active;
@@ -266,7 +268,7 @@
     $('main').append(hist);
     const loadHist = async () => {
       const rows = await q(sb.from('subscriptions').select('*').eq('user_id', p.id).order('created_at', { ascending: false }).limit(10));
-      const L = { pending: 'En revisión', active: 'Activa', rejected: 'Rechazada' };
+      const L = { pending: 'En revisión', active: 'Activa', paused: 'Pausada', expired: 'Vencida', rejected: 'Rechazada' };
       hist.innerHTML = '<h2>Mis solicitudes</h2>' + (rows.map(x =>
         `<div class="service-card"><div class="row"><b>${x.plan === 'weekly' ? 'Semanal' : 'Mensual'} · ${money(x.amount)}</b><span class="pill">${L[x.status]}</span></div>` +
         `<small class="muted">Solicitada ${fdate(x.created_at)}${x.status === 'active' ? ' · vence ' + fdate(x.expires_at) : ''}</small></div>`).join('') || '<div class="empty">Aún no tienes solicitudes.</div>');
@@ -434,57 +436,106 @@
     const g = await guard(['admin']); if (!g) return;
     $('#welcome').textContent = 'Panel de administración';
 
+    const ACCT = { pending: ['Pendiente', 'warn'], active: ['Activa', 'good'], suspended: ['Pausada', 'bad'], rejected: ['Rechazada', 'bad'] };
+    const SUBL = { pending: 'En revisión', active: 'Activa', paused: 'Pausada', expired: 'Vencida', rejected: 'Rechazada' };
+    const list = (arr, fn) => arr.map(fn).join('') || '<div class="empty">Sin registros.</div>';
+    const a = (act, id, v, label, cls = '') => `<button class="btn ${cls} small" data-a="${act}" data-id="${id}" data-v="${v}">${label}</button>`;
+    const row = (left, state, buttons = '') =>
+      `<div class="admin-row"><div class="row"><div>${left}</div>${state ? `<span class="pill">${state}</span>` : ''}</div>${buttons ? `<div class="actions">${buttons}</div>` : ''}</div>`;
+
     const load = async () => {
       const get = (t, n) => q(sb.from(t).select('*').order('created_at', { ascending: false }).limit(n));
       const [profiles, subs, services, complaints, audit, offers] = await Promise.all([
-        get('profiles', 1000), get('subscriptions', 300), get('services', 200), get('complaints', 200), get('audit_log', 100), get('offers', 2000)]);
+        get('profiles', 1000), get('subscriptions', 500), get('services', 300), get('complaints', 200), get('audit_log', 100), get('offers', 2000)]);
       const tps = await q(sb.from('transporter_profiles').select('*'));
       const user = Object.fromEntries(profiles.map(p => [p.id, p]));
       const tp = Object.fromEntries(tps.map(t => [t.user_id, t]));
       const name = id => esc(user[id]?.full_name || '—');
-      const count = {}; offers.filter(o => o.status === 'pending').forEach(o => (count[o.service_id] = (count[o.service_id] || 0) + 1));
-      const list = (arr, fn) => arr.map(fn).join('') || '<div class="empty">Sin registros.</div>';
-      const row = (left, state, buttons = '') =>
-        `<div class="admin-row"><div class="row"><div>${left}</div>${state ? `<span class="pill">${state}</span>` : ''}</div>${buttons ? `<div class="actions">${buttons}</div>` : ''}</div>`;
-      const a = (act, id, v, label, cls = '') => `<button class="btn ${cls} small" data-a="${act}" data-id="${id}" data-v="${v}">${label}</button>`;
-
+      const offerCount = {}; offers.filter(o => o.status === 'pending').forEach(o => (offerCount[o.service_id] = (offerCount[o.service_id] || 0) + 1));
       const clients = profiles.filter(p => p.role === 'client'), trs = profiles.filter(p => p.role === 'transporter');
-      $('#stats').innerHTML = [
-        [clients.length, 'Clientes'], [trs.length, 'Transportistas'], [trs.filter(p => p.account_status === 'pending').length, 'Transportistas por aprobar'],
-        [subs.filter(s => s.status === 'pending').length, 'Pagos pendientes'], [services.length, 'Servicios'], [complaints.filter(c => c.status !== 'resolved').length, 'Reclamos abiertos']
-      ].map(([n, l]) => `<div class="stat"><b>${n}</b><span>${l}</span></div>`).join('');
 
-      const SL = { pending: 'Pendiente', active: 'Activo', suspended: 'Suspendido', rejected: 'Rechazado' };
-      const userRow = p => {
-        const t = tp[p.id];
-        return row(
-          (t?.photo_path ? `<img class="avatar" alt="" src="${esc(photoUrl(t.photo_path))}"><br>` : '') +
-          `<b>${esc(p.full_name)}</b><small>${esc(p.email)} · Cel ${esc(p.phone)} · DNI ${esc(p.dni)} · ${esc(p.age)} años</small>` +
-          (t ? `<small>Moto: ${esc(t.motorcycle)} · ${esc(t.motorcycle_color)} · Placa ${esc(t.plate)} · Servicios: ${esc(t.service_types.join(', '))}</small>` : '') +
-          `<small>Registrado ${fdate(p.created_at)}</small>`, SL[p.account_status],
-          (p.account_status !== 'active' ? a('status', p.id, 'active', p.account_status === 'pending' ? 'Aprobar' : 'Activar') : '') +
-          (p.account_status === 'pending' ? a('status', p.id, 'rejected', 'Rechazar', 'danger') : '') +
-          (p.account_status === 'active' ? a('status', p.id, 'suspended', 'Suspender', 'danger') : ''));
+      // estado de suscripción de un usuario
+      const subOf = uid => {
+        const mine = subs.filter(x => x.user_id === uid);
+        const act = mine.find(x => x.status === 'active' && new Date(x.expires_at) > Date.now());
+        if (act) return { k: 'active', row: act, label: 'Activa · vence ' + fdate(act.expires_at), cls: 'good' };
+        const pau = mine.find(x => x.status === 'paused');
+        if (pau) return { k: 'paused', row: pau, label: 'Pausada', cls: 'warn' };
+        const pen = mine.find(x => x.status === 'pending');
+        if (pen) return { k: 'pending', row: pen, label: 'Pago en revisión', cls: 'warn' };
+        return { k: 'none', label: mine.length ? 'Vencida' : 'Sin suscripción', cls: 'bad' };
       };
-      $('#adminClients').innerHTML = list(clients, userRow);
-      $('#adminTransporters').innerHTML = list(trs, userRow);
 
-      const SS = { pending: 'En revisión', active: 'Activa', rejected: 'Rechazada' };
+      $('#stats').innerHTML = [
+        [clients.length, 'Clientes'], [trs.length, 'Transportistas'],
+        [trs.filter(p => p.account_status === 'pending').length, 'Transportistas por aprobar'],
+        [subs.filter(x => x.status === 'pending').length, 'Pagos pendientes'],
+        [profiles.filter(p => p.role !== 'admin' && subOf(p.id).k === 'active').length, 'Suscripciones activas'],
+        [complaints.filter(c => c.status !== 'resolved').length, 'Reclamos abiertos']
+      ].map(([n, l]) => `<div class="stat"><b>${n}</b><span>${l}</span></div>`).join('');
+      const setTab = (id, label, n) => { const t = $(`[data-tab=${id}]`); if (t) t.textContent = `${label} (${n})`; };
+      setTab('clients', 'Clientes', clients.length); setTab('transporters', 'Transportistas', trs.length);
+      setTab('payments', 'Pagos', subs.filter(x => x.status === 'pending').length + ' pend.'); setTab('services', 'Servicios', services.length);
+      setTab('complaints', 'Reclamos', complaints.filter(c => c.status !== 'resolved').length + ' abiertos');
+
+      // ficha de cliente / transportista (desplegable)
+      const openIds = new Set($$('details.user[open]').map(d => d.dataset.id));
+      const userCard = p => {
+        const t = tp[p.id], ss = subOf(p.id), [al, ac] = ACCT[p.account_status];
+        const mine = services.filter(s => s.client_id === p.id || s.transporter_id === p.id);
+        const done = mine.filter(s => s.status === 'completed').length;
+        const acct = p.account_status === 'active' ? a('status', p.id, 'suspended', '⏸ Pausar cuenta', 'danger')
+          : a('status', p.id, 'active', p.account_status === 'pending' ? '✔ Aprobar cuenta' : '▶ Activar cuenta') +
+            (p.account_status === 'pending' ? a('status', p.id, 'rejected', 'Rechazar', 'danger') : '');
+        const subBtns = (ss.k === 'active' ? a('pause', p.id, 1, '⏸ Pausar suscripción', 'ghost') : '') +
+          (ss.k === 'paused' ? a('pause', p.id, 0, '▶ Reanudar suscripción') : '') +
+          (ss.k === 'pending' ? a('sub', ss.row.id, 1, '✔ Aprobar pago') + a('sub', ss.row.id, 0, 'Rechazar pago', 'danger') : '') +
+          (ss.k !== 'paused' ? a('grant', p.id, 'weekly', 'Activar 7 días', 'secondary') + a('grant', p.id, 'monthly', 'Activar 30 días', 'secondary') : '');
+        const q = [p.full_name, p.dni, p.phone, p.email, t?.plate].join(' ').toLowerCase();
+        return `<details class="user" data-id="${p.id}" data-q="${esc(q)}" ${openIds.has(p.id) ? 'open' : ''}>
+          <summary><span class="uname">${esc(p.full_name)}</span><span class="pill ${ac}">Cuenta ${al}</span><span class="pill ${ss.cls}">Suscripción: ${ss.label}</span></summary>
+          <div class="udetail">
+            ${t?.photo_path ? `<img class="avatar" alt="" src="${esc(photoUrl(t.photo_path))}">` : ''}
+            <div class="kv">
+              <p><span class="muted">DNI:</span> ${esc(p.dni)}</p><p><span class="muted">Edad:</span> ${esc(p.age)} años</p>
+              <p><span class="muted">Celular:</span> <a href="${waLink(p.phone)}" target="_blank" rel="noopener">${esc(p.phone)}</a></p>
+              <p><span class="muted">Correo:</span> ${esc(p.email)}</p>
+              <p><span class="muted">Registro:</span> ${fdate(p.created_at)}</p>
+              <p><span class="muted">Servicios:</span> ${mine.length} (${done} completados)</p>
+              ${t ? `<p><span class="muted">Moto:</span> ${esc(t.motorcycle)} · ${esc(t.motorcycle_color)}</p><p><span class="muted">Placa:</span> ${esc(t.plate)}</p>
+                     <p><span class="muted">Ofrece:</span> ${esc(t.service_types.map(x => TYPE[x]).join(' y '))}</p>` : ''}
+            </div>
+            <h4>Suscripción</h4>
+            <p>${ss.label}${ss.k === 'none' ? '' : ''}</p>
+            ${(() => { const h = subs.filter(x => x.user_id === p.id).slice(0, 4); return h.length ? '<div class="muted">' + h.map(x =>
+              `${x.plan === 'weekly' ? '7 días' : '30 días'} · ${money(x.amount)} · ${SUBL[x.status]} · ${fdate(x.created_at)}`).join('<br>') + '</div>' : ''; })()}
+            <div class="actions">${subBtns}</div>
+            <h4>Últimos servicios</h4>
+            ${mine.slice(0, 4).map(s => `<small class="muted">${TYPE[s.service_type]} · ${esc(s.origin.slice(0, 28))} → ${esc(s.destination.slice(0, 28))} · ${money(s.final_price || s.proposed_price)} · ${STATUS[s.status]}</small>`).join('<br>') || '<small class="muted">Sin servicios.</small>'}
+            <h4>Cuenta</h4>
+            <div class="actions">${acct}</div>
+          </div></details>`;
+      };
+      $('#adminClients').innerHTML = list(clients, userCard);
+      $('#adminTransporters').innerHTML = list(trs, userCard);
+      $$('.search').forEach(i => i.dispatchEvent(new Event('input', { bubbles: true })));
+
       $('#adminSubscriptions').innerHTML = list([...subs].sort((x, y) => (y.status === 'pending') - (x.status === 'pending')), s =>
         row(`<b>${name(s.user_id)}</b> <small>(${user[s.user_id]?.role === 'client' ? 'cliente' : 'transportista'}) · ${s.plan === 'weekly' ? 'Semanal' : 'Mensual'} · ${money(s.amount)}</small>` +
-          `<small>Solicitada ${fdate(s.created_at)}${s.status === 'active' ? ' · vence ' + fdate(s.expires_at) : ''}</small>`, SS[s.status],
-          s.status === 'pending' ? a('sub', s.id, 1, 'Aprobar pago') + a('sub', s.id, 0, 'Rechazar', 'danger') : ''));
+          `<small>Solicitada ${fdate(s.created_at)}${s.status === 'active' ? ' · vence ' + fdate(s.expires_at) : ''}</small>`, SUBL[s.status],
+          s.status === 'pending' ? a('sub', s.id, 1, '✔ Aprobar pago') + a('sub', s.id, 0, 'Rechazar', 'danger') : ''));
 
       $('#adminServices').innerHTML = list(services, s =>
         row(`<b>${TYPE[s.service_type]}</b> · ${esc(s.origin)} → ${esc(s.destination)}<small>Cliente: ${name(s.client_id)} · Transportista: ${name(s.transporter_id)} · ${money(s.final_price || s.proposed_price)} · ${esc(s.payment_method)}` +
-          `${s.status === 'requested' ? ' · Ofertas: ' + (count[s.id] || 0) : ''} · ${fdate(s.created_at)}</small><small>ID: ${s.id}</small>`, STATUS[s.status]));
+          `${s.status === 'requested' ? ' · Ofertas: ' + (offerCount[s.id] || 0) : ''} · ${fdate(s.created_at)}</small><small>ID: ${s.id}</small>`, STATUS[s.status]));
 
       const CL = { open: 'Abierto', in_review: 'En revisión', resolved: 'Resuelto' };
       $('#adminComplaints').innerHTML = list(complaints, c =>
         row(`<b>${esc(c.reason)}</b> · ${name(c.user_id)}<small>${fdate(c.created_at)}${c.service_id ? ' · Servicio ' + c.service_id : ''}</small><p>${esc(c.description)}</p>`, CL[c.status],
           (c.status === 'open' ? a('comp', c.id, 'in_review', 'En revisión', 'ghost') : '') + (c.status !== 'resolved' ? a('comp', c.id, 'resolved', 'Marcar resuelto') : '')));
 
-      const AL = { account_status: 'Cambio de estado de cuenta', subscription_approved: 'Pago aprobado', subscription_rejected: 'Pago rechazado', complaint_status: 'Estado de reclamo' };
+      const AL = { account_status: 'Cambio de estado de cuenta', subscription_approved: 'Pago aprobado', subscription_rejected: 'Pago rechazado',
+        subscription_paused: 'Suscripción pausada', subscription_resumed: 'Suscripción reanudada', subscription_granted: 'Suscripción activada manualmente', complaint_status: 'Estado de reclamo' };
       $('#adminAudit').innerHTML = list(audit, x => {
         const d = x.detail || {};
         const target = x.target_type === 'user' ? name(x.target_id) : d.user_id ? name(d.user_id) : String(x.target_id || '').slice(0, 8);
@@ -493,15 +544,36 @@
       });
     };
 
+    // pestañas
+    $('#tabs').addEventListener('click', e => {
+      const t = e.target.closest('.tab'); if (!t) return;
+      $$('.tab').forEach(x => x.classList.toggle('active', x === t));
+      $$('main > section[id^=tab-]').forEach(sec => (sec.hidden = sec.id !== 'tab-' + t.dataset.tab));
+    });
+    // buscador
+    $('main').addEventListener('input', e => {
+      const i = e.target.closest('.search'); if (!i) return;
+      const text = i.value.trim().toLowerCase();
+      $$('details.user', $('#' + i.dataset.search)).forEach(d => (d.hidden = !!text && !d.dataset.q.includes(text)));
+    });
+    // acciones
+    const CONFIRM_A = {
+      status: v => v === 'suspended' ? '¿Pausar esta cuenta? No podrá usar la plataforma.' : v === 'rejected' ? '¿Rechazar esta cuenta?' : null,
+      pause: v => v === '1' ? '¿Pausar la suscripción? Se conservan los días restantes.' : null,
+      grant: () => '¿Activar el acceso manualmente (sin pago registrado en la web)?'
+    };
     $('main').addEventListener('click', async e => {
       const b = e.target.closest('button[data-a]'); if (!b) return;
-      const { a, id, v } = b.dataset;
-      if (a === 'status' && ['suspended', 'rejected'].includes(v) && !confirm('¿Confirmas esta acción sobre la cuenta?')) return;
+      const { a: act, id, v } = b.dataset;
+      const msg = CONFIRM_A[act]?.(v);
+      if (msg && !confirm(msg)) return;
       b.disabled = true;
       try {
-        if (a === 'status') await rpc('admin_set_account_status', { p_user: id, p_status: v });
-        if (a === 'sub') await rpc('admin_review_subscription', { p_id: id, p_approve: v === '1' });
-        if (a === 'comp') await rpc('admin_set_complaint_status', { p_id: id, p_status: v });
+        if (act === 'status') await rpc('admin_set_account_status', { p_user: id, p_status: v });
+        if (act === 'sub') await rpc('admin_review_subscription', { p_id: id, p_approve: v === '1' });
+        if (act === 'pause') await rpc('admin_set_subscription_paused', { p_user: id, p_pause: v === '1' });
+        if (act === 'grant') await rpc('admin_grant_subscription', { p_user: id, p_plan: v });
+        if (act === 'comp') await rpc('admin_set_complaint_status', { p_id: id, p_status: v });
         notice('Cambio guardado.');
         await load();
       } catch (err) { notice(friendly(err), true); b.disabled = false; }
