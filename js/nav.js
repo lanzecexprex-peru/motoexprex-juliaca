@@ -1,12 +1,15 @@
-// Muestra u oculta el menú según haya sesión. Se carga en <head> para evitar parpadeos.
-window.lanzecSetLogged = function (on) { document.documentElement.classList.toggle('logged', !!on); };
+/* Marca la página como "con sesión" para mostrar/ocultar el menú (CSS: html.logged).
+   Se carga en <head> para evitar parpadeos. app.js confirma la sesión real. */
 (function () {
-  var on = false;
-  try {
-    for (var i = 0; i < localStorage.length; i++) {
-      var k = localStorage.key(i);
-      if (/^sb-.*-auth-token$/.test(k) && localStorage.getItem(k)) { on = true; break; }
-    }
-  } catch (e) {}
-  window.lanzecSetLogged(on);
+  function hasToken() {
+    try {
+      for (var i = 0; i < localStorage.length; i++) {
+        var k = localStorage.key(i);
+        if (/^sb-.*-auth-token$/.test(k) && localStorage.getItem(k)) return true;
+      }
+    } catch (e) {}
+    return false;
+  }
+  window.lanzecSetLogged = function (on) { document.documentElement.classList.toggle('logged', !!on); };
+  window.lanzecSetLogged(hasToken());
 })();
