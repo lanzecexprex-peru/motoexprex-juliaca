@@ -381,16 +381,35 @@
       (s.status === 'accepted' ? `<div class="actions">${btn('start', s.id, 'Iniciar servicio')}${btn('cancel', s.id, 'Cancelar', 'danger')}</div>` : '') +
       (s.status === 'in_progress' ? `<div class="actions">${btn('finish', s.id, 'Finalizar servicio')}</div>` : '') + '</div>';
 
+    // Explica por qué no aparecen solicitudes (cuenta, suscripción o tipo de servicio)
+    const whyEmpty = (st, hasSub) => {
+      if (!st) return hasSub ? 'No hay solicitudes compatibles por ahora. Se actualiza solo.' : 'Activa tu suscripción para ver solicitudes. <a href="suscripcion.html">Suscripciones</a>';
+      const open = { mototaxi: st.open_mototaxi || 0, delivery: st.open_delivery || 0 }, mine = st.service_types || [];
+      const total = open.mototaxi + open.delivery, why = [];
+      if (st.account_status !== 'active') why.push('Tu cuenta aún no está aprobada por administración.');
+      if (st.subscription === 'pending') why.push('Tu pago está en revisión. Cuando administración lo apruebe verás las solicitudes.');
+      else if (st.subscription === 'paused') why.push('Tu suscripción está pausada por administración.');
+      else if (st.subscription !== 'active') why.push('No tienes una suscripción activa. <a href="suscripcion.html">Activa un plan</a>.');
+      if (!why.length) {
+        if (!total) why.push('Todavía no hay solicitudes abiertas de clientes. Se actualiza solo cada pocos segundos.');
+        else if (!mine.some(t => open[t])) why.push(`Hay ${total} solicitud(es) abierta(s), pero son de un servicio que tú no ofreces. Tú ofreces: ${mine.map(t => TYPE[t]).join(' y ') || '—'}.`);
+        else why.push('Hay solicitudes abiertas, pero no se pueden mostrar. Avisa a administración (revisa que la base de datos esté actualizada).');
+      } else if (total) why.push(`Mientras tanto hay ${total} solicitud(es) abierta(s) esperando transportista.`);
+      return why.join('<br>');
+    };
+
     liveList(box, async () => {
       const services = await q(sb.from('services').select('*').order('created_at', { ascending: false }).limit(100));
       const offers = await q(sb.from('offers').select('*').eq('transporter_id', uid));
-      return { services, offers, contacts: await getContacts(services.filter(s => s.transporter_id === uid)) };
-    }, ({ services, offers, contacts }) => {
+      let st = null;
+      try { st = await rpc('transporter_status'); } catch (e) { console.warn('transporter_status no disponible', e); }
+      return { services, offers, st, contacts: await getContacts(services.filter(s => s.transporter_id === uid)) };
+    }, ({ services, offers, contacts, st }) => {
       const avail = services.filter(s => s.status === 'requested');
       const mine = services.filter(s => s.transporter_id === uid);
       const byService = Object.fromEntries(offers.map(o => [o.service_id, o]));
       return `<h3>Disponibles (${avail.length})</h3>` +
-        (avail.map(s => availCard(s, byService[s.id])).join('') || `<div class="empty">${hasSub ? 'No hay solicitudes compatibles por ahora. Se actualiza solo.' : 'Activa tu suscripción para ver solicitudes. <a href="suscripcion.html">Suscripciones</a>'}</div>`) +
+        (avail.map(s => availCard(s, byService[s.id])).join('') || `<div class="empty">${whyEmpty(st, hasSub)}</div>`) +
         '<h3 class="section-title">Mis servicios</h3>' +
         (mine.map(s => mineCard(s, contacts[s.id])).join('') || '<div class="empty">Aún no has tomado servicios.</div>');
     });
